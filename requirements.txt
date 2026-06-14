@@ -1,0 +1,11 @@
+# py 3.10 : py -3.10 -m venv venv
+torch==2.10.0
+gymnasium==1.2.3
+mlflow==3.8.1
+numpy==2.2.6
+
+# FinRL installation 
+# https://finrl.readthedocs.io/en/latest/start/installation.html#prepare-for-install 
+#    git clone https://github.com/AI4Finance-Foundation/FinRL.git
+#    cd FinRL
+#    pip install .
