@@ -6,16 +6,16 @@ import sys
 from dataclasses import dataclass
 
 import pandas as pd
-pd.set_option("display.max_columns")
-pd.set_option("display.width")
+pd.set_option("display.max_columns",None)
+pd.set_option("display.width",None)
 
 
 @dataclass(frozen=True)
 class env_hypers_params():
-    start_date = "2005-04-01"
+    start_date = "1990-01-01"
     end_date = "2026-05-05"
     
-    ticker_list = [ # XIU + TSX heavy compoments (marketcap > 10B) + Gold 
+    ticker_list = [ # XIU + TSX heavy components (marketcap > 10B) + Gold 
             "RY.TO", "TD.TO", "SHOP.TO", "BMO.TO", "ENB.TO", "CM.TO",
            "BNS.TO", "AEM.TO", "CNQ.TO", "SU.TO", "XIU.TO","XGD.TO"
     ]  
