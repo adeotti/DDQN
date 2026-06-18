@@ -52,9 +52,9 @@ class buffer:
         self.q_functin = q_function
         
         self.b_cur_states = torch.zeros(NUM_ENVS,210,160,3,dtype=torch.half,device=DEVICE) # TODO : squeeze -1 dim
-        self.b_nx_states = torch.zeros(NUM_ENVS,210,160,3,dtype=torch.half,device=DEVICE)
-        self.b_reward = torch.zeros(NUM_ENVS,1,dtype=torch.half,device=DEVICE) # TODO unsqueeze -1
-        self.done = torch.zeros(NUM_ENVS,1,dtype=torch.bool,device=DEVICE)
+        self.b_nx_states = torch.zeros(NUM_ENVS,210,160,3,dtype=torch.half,device=DEVICE) # ''
+        self.b_reward = torch.zeros(NUM_ENVS,1,dtype=torch.half,device=DEVICE) # TODO unsqueeze -1 dim
+        self.done = torch.zeros(NUM_ENVS,1,dtype=torch.bool,device=DEVICE) # ''
 
         self.step_num = 0
 
@@ -64,16 +64,25 @@ class buffer:
         self.env.reset()
         action = self.env.action_space.sample()
         state,reward,done,trunc,info = self.env.step(action)
+        
+        """
+        self.b_cur_states[self.step_num]._copy(torch.from_numpy())
+        self.b_nx_states[self.step_num]._copy(torch.from_numpy(states))
+        self.b_reward[self.step_num]._copy(torch.from_numpy(reward))
+        self.b_done[self.step_num]._copy(torch.from_numpy(done))
+        """
            
     def sample(self,batch):
         pass
 
 
 class ddqn:
-    def __init__(start=False):
+    def __init__(start=False,storage_path=None):
         self.env = vec_env()
+        self.policy = policy() ; self.policy.to(DEVICE) ; # self.policy.compile()
+        self.q_func = q_func() ; self.q_func.to(DEVICE) ; # self.q_func.compile()
     
-    def save(self):
+    def save(self,storage_path):
         pass
     
     def run(self,storage_path=None):
@@ -92,6 +101,5 @@ class ddqn:
 
 if __name__ == "__main__":
     #ddqn().run(True,storage_path="./")
-    env = vec_env()
-    buffer(env).step()
+
     
