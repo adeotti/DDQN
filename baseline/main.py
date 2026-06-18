@@ -66,10 +66,10 @@ class buffer:
         state,reward,done,trunc,info = self.env.step(action)
         
         """
-        self.b_cur_states[self.step_num]._copy(torch.from_numpy())
-        self.b_nx_states[self.step_num]._copy(torch.from_numpy(states))
-        self.b_reward[self.step_num]._copy(torch.from_numpy(reward))
-        self.b_done[self.step_num]._copy(torch.from_numpy(done))
+        self.b_cur_states[self.step_num].copy_(torch.from_numpy())
+        self.b_nx_states[self.step_num].copy_(torch.from_numpy(states))
+        self.b_reward[self.step_num].copy_(torch.from_numpy(reward))
+        self.b_done[self.step_num].copy_(torch.from_numpy(done))
         """
            
     def sample(self,batch):
