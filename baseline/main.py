@@ -28,15 +28,6 @@ def vec_env():
     return AsyncVectorEnv([make for _ in range(NUM_ENVS)])
 
 
-class policy(nn.Module):
-    def __init__(self):
-        super().__init__()
-        pass
-
-    def forward(s): # p(s) -> a
-        return None
-
-
 class q_function(nn.Module):
     def __init__(self):
         pass
@@ -46,9 +37,8 @@ class q_function(nn.Module):
 
 
 class buffer:
-    def __init__(self,env=None,policy=None,q_function=None):
+    def __init__(self,env=None,q_function=None):
         self.env = env
-        self.policy = policy
         self.q_functin = q_function
         
         self.b_q_values = torch.zeros(NUM_ENVS,1,dtype=torch.half,device=DEVICE)
@@ -87,8 +77,8 @@ class buffer:
 class ddqn:
     def __init__(start=False,storage_path=None):
         self.env = vec_env()
-        self.policy = policy() ; self.policy.to(DEVICE) ; # self.policy.compile()
-        self.q_func = q_func() ; self.q_func.to(DEVICE) ; # self.q_func.compile()
+        self.q_func = q_func()               ; self.q_func.to(DEVICE) ; # self.q_func.compile()
+        self.q_targ = deep_copy(self.q_func) ; self.q_targ.to(DEVICE) ; # self.q_targ.compile()
     
     def save(self,storage_path):
         pass
