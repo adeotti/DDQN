@@ -1,6 +1,6 @@
 # Baseline environment: Ms. Pac-Man (Atari)
 # Results in Figure S4, page 21 of the original paper
-# Reward should peak around 250k steps
+# from fig s4, reward should peak and flatten around 250k steps
 
 import gymnasium as gym 
 import ale_py
@@ -13,10 +13,10 @@ from copy import deepcopy
 from dataclasses import dataclass
 import mlflow
 
-
 MAX_EP_STEPS = 500
 NUM_ENVS = 2
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+MAX_STEPS = int(1e4)
 
 def vec_env():
     def make():
@@ -54,22 +54,21 @@ class buffer:
         self.step_num+=1
         
         self.env.reset()
-        action = self.env.action_space.sample()
-        state,reward,done,trunc,info = self.env.step(action)
-        
-        """
-        self.b_cur_states[self.step_num].copy_(torch.from_numpy())
-        self.b_nx_states[self.step_num].copy_(torch.from_numpy(states))
-        self.b_reward[self.step_num].copy_(torch.from_numpy(reward))
-        self.b_done[self.step_num].copy_(torch.from_numpy(done))
-        """
+        with torch.no_grad():
+            action = self.env.action_space.sample()
+            state,reward,done,trunc,info = self.env.step(action)
+            
+            """
+            self.b_cur_states[self.step_num].copy_(torch.from_numpy())
+            self.b_nx_states[self.step_num].copy_(torch.from_numpy(states))
+            self.b_reward[self.step_num].copy_(torch.from_numpy(reward))
+            self.b_done[self.step_num].copy_(torch.from_numpy(done))
+            """
 
-        """
-        if self.step_num % MAX_EP_STEPS:
-            # TODO : compute target
-            pass
-        """
-           
+            # TD(0):
+            # target = reward + GAMMA * max(self.q_function(states,action))
+
+
     def sample(self,batch):
         pass
 
@@ -99,5 +98,5 @@ class ddqn:
 
 if __name__ == "__main__":
     #ddqn().run(True,storage_path="./")
-
+   
     
