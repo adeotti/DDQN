@@ -1,4 +1,9 @@
+# Baseline environment: Ms. Pac-Man (Atari)
+# Results in Figure S4, page 21 of the original paper
+# Reward should peak around 250k steps
+
 import gymnasium as gym 
+import ale_py
 from gymnasium.vector.async_vector_env import AsyncVectorEnv
 import numpy as np
 import torch,sys
@@ -7,6 +12,17 @@ from torch.optim import adam
 from copy import deepcopy
 from dataclasses import dataclass
 import mlflow
+
+
+# - hypers 
+NUM_ENVS = 2
+
+def vec_env():
+    def make():
+        x = gym.make("ALE/MsPacman-v5")
+        # - norm etc
+        return x
+    return AsyncVectorEnv([make for _ in range(NUM_ENVS)])
 
 
 class policy(nn.Module):
@@ -36,7 +52,6 @@ class buffer:
     def sample(self,batch):
         pass
 
-
 class ddqn:
     def __init__(start=False):
         pass
@@ -59,5 +74,5 @@ class ddqn:
         
 
 if __name__ == "__main__":
-    ddqn().run(False,storage_path="./")
-        
+    ddqn().run(True,storage_path="./")
+    
