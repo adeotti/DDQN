@@ -1,22 +1,30 @@
 # Baseline environment: Ms. Pac-Man (Atari)
 # Results in Figure S4, page 21 of the original paper
-# from fig s4, reward should peak and flatten around 250k steps
+# from fig s4, reward should peak around 250k steps
 
 import gymnasium as gym 
 import ale_py
 from gymnasium.vector.async_vector_env import AsyncVectorEnv
+
 import numpy as np
 import torch,sys
 import torch.nn as nn
 from torch.optim import adam
+
 from copy import deepcopy
 from dataclasses import dataclass
 import mlflow
 
+
+# -
 MAX_EP_STEPS = 500
 NUM_ENVS = 2
+# -
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-MAX_STEPS = int(1e4)
+MAX_STEPS = int(1e4) # int(1e6) # same as in the original paper
+BATCH = 512
+LR = int(1e-4)
+
 
 def vec_env():
     def make():
@@ -39,7 +47,7 @@ class q_function(nn.Module):
 class buffer:
     def __init__(self,env=None,q_function=None):
         self.env = env
-        self.q_functin = q_function
+        self.q_function = q_function
         
         self.b_q_values = torch.zeros(NUM_ENVS,1,dtype=torch.half,device=DEVICE)
         self.b_q_target = self.b_q_values.clone().detach()
@@ -51,10 +59,10 @@ class buffer:
         self.step_num = 0
 
     def step(self):
-        self.step_num+=1
-        
-        self.env.reset()
         with torch.no_grad():
+            self.step_num+=1
+        
+            self.env.reset()
             action = self.env.action_space.sample()
             state,reward,done,trunc,info = self.env.step(action)
             
@@ -64,10 +72,15 @@ class buffer:
             self.b_reward[self.step_num].copy_(torch.from_numpy(reward))
             self.b_done[self.step_num].copy_(torch.from_numpy(done))
             """
-
+            """
             # TD(0):
             # target = reward + GAMMA * max(self.q_function(states,action))
+            # self.b_q_target[self.step_num].copy_(target)
+            """
 
+            #  curr state = nx state
+            
+            return torch.tensor(reward)
 
     def sample(self,batch):
         pass
@@ -78,6 +91,7 @@ class ddqn:
         self.env = vec_env()
         self.q_func = q_func()               ; self.q_func.to(DEVICE) ; # self.q_func.compile()
         self.q_targ = deep_copy(self.q_func) ; self.q_targ.to(DEVICE) ; # self.q_targ.compile()
+        self.optim = adam(self.q_func.parameters(),lr=LR)
     
     def save(self,storage_path):
         pass
