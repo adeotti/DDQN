@@ -51,8 +51,10 @@ class buffer:
         self.policy = policy
         self.q_functin = q_function
         
+        self.b_q_values = torch.zeros(NUM_ENVS,1,dtype=torch.half,device=DEVICE)
+        self.b_q_target = self.b_q_values.clone().detach()
         self.b_cur_states = torch.zeros(NUM_ENVS,210,160,3,dtype=torch.half,device=DEVICE) # TODO : squeeze -1 dim
-        self.b_nx_states = torch.zeros(NUM_ENVS,210,160,3,dtype=torch.half,device=DEVICE) # ''
+        self.b_nx_states = self.b_curr_state.clone().detach()
         self.b_reward = torch.zeros(NUM_ENVS,1,dtype=torch.half,device=DEVICE) # TODO unsqueeze -1 dim
         self.done = torch.zeros(NUM_ENVS,1,dtype=torch.bool,device=DEVICE) # ''
 
@@ -70,6 +72,12 @@ class buffer:
         self.b_nx_states[self.step_num].copy_(torch.from_numpy(states))
         self.b_reward[self.step_num].copy_(torch.from_numpy(reward))
         self.b_done[self.step_num].copy_(torch.from_numpy(done))
+        """
+
+        """
+        if self.step_num % MAX_EP_STEPS:
+            # TODO : compute target
+            pass
         """
            
     def sample(self,batch):
