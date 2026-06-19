@@ -6,7 +6,8 @@ from gymnasium.wrappers.transform_observation import GrayscaleObservation,Resize
 import numpy as np
 import torch,sys
 import torch.nn as nn
-from torch.distribution import Categorical
+import torch.nn.functional as F
+from torch.distributions import Categorical
 from torch.optim import adam
 
 from copy import deepcopy
@@ -14,7 +15,6 @@ from dataclasses import dataclass
 import mlflow
 
 
-# -
 MAX_EP_STEPS = 500
 NUM_ENVS = 2
 R_SHAPE = (150,150)
@@ -38,10 +38,18 @@ def vec_env():
 
 class q_function(nn.Module):
     def __init__(self):
-        pass
+        self.c1 = None
+        self.c2 = None
+        self.c3 = None
+        self.c4 = None
 
-    def forward(self,s,a): # q(s,a) -> q value
-        return None
+    def forward(self,s,a): # q(s,a) -> value
+        x = None
+        x = None
+        x = None
+        x = None
+        x = None
+        return Categorical(F.softmax(x,-1))
 
 
 class buffer:
@@ -63,8 +71,10 @@ class buffer:
         with torch.no_grad():
             self.step_num+=1
             
-            # q val = self.q_function(self.state,action)
+            # q_val = self.q_function(self.state,action)
+            # self.b_q_values[self.step_num].copy_(q_val)
             action = self.env.action_space.sample()
+
             nx_state,reward,done,trunc,info = self.env.step(action) 
 
             self.b_curr_states[self.step_num].copy_(self.state)
@@ -73,7 +83,8 @@ class buffer:
             self.b_done[self.step_num].copy_(torch.from_numpy(done))
          
             # TD(0) 
-            target = torch.as_tensor(reward,device=DEVICE) + GAMMA * torch.argmax(self.q_function(nx_states,action))
+            target = torch.as_tensor(reward,device=DEVICE) 
+            target += GAMMA * torch.argmax(self.q_function(nx_state,action).probs)
             self.b_q_target[self.step_num].copy_(target)
 
             self.state = torch.as_tensor(nx_state,device=DEVICE) 
