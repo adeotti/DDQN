@@ -1,7 +1,7 @@
 import gymnasium as gym 
 import ale_py
 from gymnasium.vector.async_vector_env import AsyncVectorEnv
-from gymnasium.wrappers.transform_observation import GrayscaleObservation
+from gymnasium.wrappers.transform_observation import GrayscaleObservation,ResizeObservation
 
 import numpy as np
 import torch,sys
@@ -16,6 +16,7 @@ import mlflow
 # -
 MAX_EP_STEPS = 500
 NUM_ENVS = 2
+R_SHAPE = (150,150)
 # -
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 MAX_STEPS = int(1e4) # int(1e6) # same as in the original paper
@@ -28,8 +29,8 @@ def vec_env():
     def make():
         x = gym.make("ALE/MsPacman-v5",max_episode_steps=MAX_EP_STEPS)
         x = GrayscaleObservation(x)
-        # TODO
-        # frame stack,skip,obs reshape
+        x = ResizeObservation(x,R_SHAPE)
+        # TODO : frame stack,skip,obs reshape
         return x
     return AsyncVectorEnv([make for _ in range(NUM_ENVS)])
 
@@ -50,7 +51,7 @@ class buffer:
         # - 
         self.b_q_values = torch.zeros(MAX_STEPS,NUM_ENVS,dtype=torch.half,device=DEVICE)
         self.b_q_target = self.b_q_values.clone().detach()
-        self.b_curr_states = torch.zeros(MAX_STEPS,NUM_ENVS,210,160,dtype=torch.half,device=DEVICE) 
+        self.b_curr_states = torch.zeros(MAX_STEPS,NUM_ENVS,*R_SHAPE,dtype=torch.half,device=DEVICE) 
         self.b_nx_states = self.b_curr_states.clone().detach()
         self.b_reward = torch.zeros(MAX_STEPS,NUM_ENVS,dtype=torch.half,device=DEVICE)
         self.b_done = torch.zeros(MAX_STEPS,NUM_ENVS,dtype=torch.bool,device=DEVICE) 
@@ -70,7 +71,7 @@ class buffer:
             self.b_reward[self.step_num].copy_(torch.from_numpy(reward))
             self.b_done[self.step_num].copy_(torch.from_numpy(done))
          
-            # TD(0):  
+            # TD(0) 
             target = torch.as_tensor(reward) + GAMMA # * max(self.q_function(states,action))
             self.b_q_target[self.step_num].copy_(target)
 
