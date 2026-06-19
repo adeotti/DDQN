@@ -6,6 +6,7 @@ from gymnasium.wrappers.transform_observation import GrayscaleObservation,Resize
 import numpy as np
 import torch,sys
 import torch.nn as nn
+from torch.distribution import Categorical
 from torch.optim import adam
 
 from copy import deepcopy
@@ -19,7 +20,7 @@ NUM_ENVS = 2
 R_SHAPE = (150,150)
 # -
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-MAX_STEPS = int(1e4) # int(1e6) # same as in the original paper
+MAX_STEPS = int(1e4) # int(1e6) 
 GAMMA = .99
 BATCH = 512
 LR = int(1e-4)
@@ -72,11 +73,10 @@ class buffer:
             self.b_done[self.step_num].copy_(torch.from_numpy(done))
          
             # TD(0) 
-            target = torch.as_tensor(reward) + GAMMA # * max(self.q_function(states,action))
+            target = torch.as_tensor(reward,device=DEVICE) + GAMMA * torch.argmax(self.q_function(nx_states,action))
             self.b_q_target[self.step_num].copy_(target)
 
-            self.state = torch.as_tensor(nx_state,device=DEVICE)
-            
+            self.state = torch.as_tensor(nx_state,device=DEVICE) 
             return torch.from_numpy(reward)
 
     def sample(self,batch):
