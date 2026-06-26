@@ -1,86 +1,96 @@
 """
 Double Q-learning (Hasselt, 2010)
 https://papers.nips.cc/paper_files/paper/2010/hash/091d584fced301b442654dd8c23b3fc9-Abstract.html
+
+environment : cliff walking
+action space : 4
+observation space : 48
 """
 
 import gymnasium as gym 
-import ale_py
-from gymnasium.vector.async_vector_env import AsyncVectorEnv
-from gymnasium.wrappers.transform_observation import GrayscaleObservation,ResizeObservation
-
-import numpy as np
 import torch,sys,random,mlflow
-import torch.nn as nn
-import torch.nn.functional as F
-from torch import tensor
-
-from collections import deque
 from tqdm import tqdm
 
 
-MAX_EP_STEPS = 500
-NUM_ENVS = 20
-R_SHAPE = (150,150)
-MAX_STEPS = 2_000 
-GAMMA = .95
-#LR TODO use polynomial like in the paper 
-
-def make_env():
-    pass
-
-
 class ddqn:
-    def __init__(self,start = False,storage_path=None):
-        self.start = start  
-        self.buffer = deque(maxlen=MAX_EP_STEPS)
+    
+    n_ep = 500     # number of episodes
+    horizon = 100 # steps per episodes
+    epsilon = 0.1
+    u_prob = 0.5  # update probability
+    alpha = 0.1   # step size
+    gamma = 1
 
-    def q_update(self,transition,q1,q2):
-        with torch.no_grad():
-            state,nx_state,reward,done,action = transition
-            
-            # TODO : fix formula
-            argmax = torch.argmax(q1(nx_state),1)
-            disc_q2 = GAMMA * q2(nx_state) # discounted q2 value
-            target = (reward + disc_q2.mean(-1) * (1-done.float())).unsqueeze(-1) 
-        
-        new_q = q1(state)
-        new_q = torch.gather(new_q,1,action.unsqueeze(-1))
-        """
-        loss = F.smooth_l1_loss(new_q,target).mean()
-        self.optim.zero_grad(set_to_none=True)
-        loss.backward()
-        self.optim.step()
-        """
-        return loss.item()
+    def __init__(self):
+        self.env = gym.make("CliffWalking-v1",max_episode_steps=self.horizon)
+        self.o_s = self.env.observation_space.n  # obs space shape
+        self.a_s = self.env.action_space.n       # action space shape
 
-    def run(self):
-        if self.start:
-            with mlflow.start_run() as run:
-                self.state = tensor(self.env.reset()[0],dtype=torch.float,device=DEVICE).unsqueeze(1)
-                
-                for n in tqdm(range(MAX_STEPS),total=MAX_STEPS):
-                    #TODO : FIX LOOP LOGIC AND ADD EGREEDY
-                    for i in range(MAX_EP_STEPS):
-                        with torch.no_grad():
-                            action = torch.argmax(self.q1(self.state) + self.q2(self.state),dim=1)
-                            nx_state,reward,done,trunc,info = self.env.step(action.long().tolist())
-                            self.buffer.append(
-                                [
-                                    self.state,
-                                    tensor(nx_state,dtype=torch.float,device=DEVICE).unsqueeze(1),
-                                    tensor(reward,device=DEVICE),
-                                    tensor(done,device=DEVICE),
-                                    action
-                                ]
-                            )
-                            self.state = tensor(nx_state,dtype=torch.float,device=DEVICE).unsqueeze(1) 
-                                               
-                        for transition in self.buffer:
-                            if random.random() < 0.5:
-                                loss = self.q_update(transition,self.q1,self.q2)
-                            else:
-                                loss = self.q_update(transition,self.q2,self.q1)
-                                    
+        self.q_a = torch.zeros((self.o_s,self.a_s),dtype=torch.half)
+        self.q_b = torch.zeros((self.o_s,self.a_s),dtype=torch.half)
+
+    def main(self):
+        with mlflow.start_run() as run:
+            for n in tqdm(range(self.n_ep),total=self.n_ep):
+
+                state = self.env.reset()[0]
+                for i in range(self.horizon):
+                    if random.random() > self.epsilon:
+                        action = self.env.action_space.sample()
+                    else:
+                        action = torch.argmax(self.q_a[state] + self.q_b[state]).tolist()
                     
+                    nx_state,reward,done,trunc,_ = self.env.step(action) 
+                
+                    if random.random() > self.u_prob:
+                        a = torch.argmax(self.q_a[nx_state]) # a*
+                        a_eval = self.q_b[nx_state,a] 
+
+                        pred = self.q_a[state,action]
+                        target = reward + (self.gamma * a_eval * (1 - done))
+                        loss = pred - target
+                        
+                        self.q_a[state,action] += self.alpha * loss
+                        assert torch.all(torch.isfinite(self.q_a)), f"{self.q_a[state]}"
+                    else:
+                        b = torch.argmax(self.q_b[nx_state]) # b*
+                        b_eval = self.q_a[nx_state,b]
+
+                        pred = self.q_b[state,action]
+                        target = reward + (self.gamma * b_eval * (1 - done))
+                        loss = pred - target
+
+                        self.q_b[state,action] += self.alpha * loss
+                        assert torch.all(torch.isfinite(self.q_b)), f"{self.q_b[state]}"
+
+                    state = nx_state 
+                    if done:
+                        state = self.env.reset()[0]
+                    elif trunc:
+                        self.env.close()
+
+        return self.q_a,self.q_b
+   
+
+    def test(self):
+        q_a,q_b = self.main() 
+
+        self.env = gym.make("CliffWalking-v1",render_mode="human")
+        state = self.env.reset()[0]
+        
+        for n in range(self.horizon):
+            action = torch.argmax(q_a[state] + q_b[state]).tolist()
+            
+            nx_state,_,done,trunc,_ = self.env.step(action)
+
+            state = nx_state
+            self.env.render()
+
+            if trunc:
+                self.env.close()
+            if done:
+                state = self.env.reset()[0]
+            
+        
 if __name__ == "__main__":
-    ddqn(False,"./").run() 
+    ddqn().test() 
