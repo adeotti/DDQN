@@ -15,12 +15,11 @@ from tqdm import tqdm
 
 class ddqn:
     
-    n_ep = 250     # number of episodes
-    horizon = 200  # steps per episodes
+    n_ep = 600     # number of episodes
+    horizon = 150  # steps per episodes
     u_prob = 0.5   # update probability
-    alpha = 0.3    # step size
-    gamma = 0.98
-    power = 0.8
+    gamma = 1
+    power = 0.6
 
     def __init__(self):
         self.env = gym.make("CliffWalking-v1",max_episode_steps=self.horizon)
@@ -37,8 +36,9 @@ class ddqn:
         self.get_epsilon = lambda x : 1/torch.sqrt(x)
         self.get_step = lambda x : 1/torch.pow(x,self.power)
         self.r = 0
-        self.r_data = []
-        self.loss_data = []
+        self.r_data = torch.zeros(self.n_ep*self.horizon,dtype=torch.float)    
+        self.loss_data = torch.zeros(self.n_ep*self.horizon,dtype=torch.float) 
+        
   
     def main(self):
         for n in tqdm(range(self.n_ep),total=self.n_ep):
@@ -60,7 +60,7 @@ class ddqn:
                     a_eval = self.q_b[nx_state,a] 
 
                     pred = self.q_a[state,action]
-                    target = reward + (self.gamma * a_eval * (1-trunc))
+                    target = reward + (self.gamma * a_eval * (1-done))
                     loss = target - pred
 
                     self.n_a[state,action] +=1
@@ -72,7 +72,7 @@ class ddqn:
                     b_eval = self.q_a[nx_state,b]
 
                     pred = self.q_b[state,action]
-                    target = reward + (self.gamma * b_eval * (1-trunc))
+                    target = reward + (self.gamma * b_eval * (1-done))
                     loss = target - pred
                     
                     self.n_b[state,action] += 1
@@ -83,18 +83,19 @@ class ddqn:
                 state = nx_state
                 self.r += reward
    
-                if trunc:
+                if done or trunc:
                     break
             
-            self.loss_data.append(loss.item())
-            self.r_data.append(self.r) # tracking rewards per episodes
+            self.loss_data[n].copy_(loss.item())
+            self.r_data[n].copy_(self.r)
             self.r = 0
                                   
-        return self.q_a,self.q_b,[self.loss_data,self.r_data]
+        return self.q_a,self.q_b,[self.loss_data.tolist(),self.r_data.tolist()]
 
 
     def test(self):
         q_a,q_b,logs = self.main()
+
         self.env = gym.make("CliffWalking-v1",render_mode="human")
         state = self.env.reset()[0]
         
@@ -107,6 +108,11 @@ class ddqn:
 
             if done or trunc:
                 break
+
+        fig,axes = plt.subplots(2,1,figsize=(5,5))
+        axes[0].plot(logs[0]) ; axes[0].set_title("Loss")
+        axes[1].plot(logs[1]) ; axes[1].set_title("ep rewards")
+        plt.show()
             
         
 if __name__ == "__main__":
