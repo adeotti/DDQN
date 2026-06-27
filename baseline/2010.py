@@ -14,9 +14,8 @@ from tqdm import tqdm
 
 class ddqn:
     
-    n_ep = 600     # number of episodes
+    n_ep = 500     # number of episodes
     horizon = 200  # steps per episodes
-    epsilon = 0.2
     u_prob = 0.5   # update probability
     alpha = 0.3    # step size
     gamma = 0.99
@@ -28,20 +27,25 @@ class ddqn:
 
         self.q_a = torch.zeros((self.o_s,self.a_s),dtype=torch.float)
         self.q_b = torch.zeros((self.o_s,self.a_s),dtype=torch.float)
-
+        self.visit_count = torch.zeros((self.o_s,),dtype=torch.float)
+  
     def main(self):
         with mlflow.start_run() as run:
             for n in tqdm(range(self.n_ep),total=self.n_ep):
 
                 state = self.env.reset()[0]
                 for i in range(self.horizon):
-                    if random.random() < self.epsilon:
+
+                    self.visit_count[state] += 1
+                    epsilon = 1/torch.sqrt(self.visit_count[state])
+                
+                    if random.random() < epsilon.item():
                         action = self.env.action_space.sample()
                     else:
                         action = torch.argmax(self.q_a[state] + self.q_b[state]).tolist()
                     
                     nx_state,reward,done,trunc,_ = self.env.step(action) 
-        
+                     
                     if random.random() > self.u_prob: 
                         a = torch.argmax(self.q_a[nx_state]) # a*
                         a_eval = self.q_b[nx_state,a] 
@@ -49,7 +53,7 @@ class ddqn:
                         pred = self.q_a[state,action]
                         target = reward + (self.gamma * a_eval * (1-done))
                         loss = target - pred
-                        
+
                         self.q_a[state,action] += (self.alpha * loss)
                         assert torch.all(torch.isfinite(self.q_a)), f"{self.q_a[state]}"
                     else:
@@ -59,12 +63,12 @@ class ddqn:
                         pred = self.q_b[state,action]
                         target = reward + (self.gamma * b_eval * (1-done))
                         loss = target - pred
-
-                        self.q_b[state,action] += self.alpha * loss
+                        
+                        self.q_b[state,action] += (self.alpha * loss)
                         assert torch.all(torch.isfinite(self.q_b)), f"{self.q_b[state]}"
 
                     state = nx_state
-    
+       
                     if done or trunc:
                         break
                                   
@@ -86,7 +90,6 @@ class ddqn:
 
             if done or trunc:
                 break
-            
         
 if __name__ == "__main__":
     ddqn().test() 
