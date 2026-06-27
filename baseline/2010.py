@@ -14,11 +14,13 @@ from tqdm import tqdm
 
 class ddqn:
     
-    n_ep = 500     # number of episodes
+    n_ep = 250     # number of episodes
     horizon = 200  # steps per episodes
+    epsilon = 0.1
     u_prob = 0.5   # update probability
     alpha = 0.3    # step size
-    gamma = 0.99
+    gamma = 0.98
+    power = 0.8
 
     def __init__(self):
         self.env = gym.make("CliffWalking-v1",max_episode_steps=self.horizon)
@@ -28,56 +30,67 @@ class ddqn:
         self.q_a = torch.zeros((self.o_s,self.a_s),dtype=torch.float)
         self.q_b = torch.zeros((self.o_s,self.a_s),dtype=torch.float)
         self.visit_count = torch.zeros((self.o_s,),dtype=torch.float)
+
+        self.n_a = torch.zeros((self.o_s,self.a_s),dtype=torch.float) # update count of q_a 
+        self.n_b = torch.zeros((self.o_s,self.a_s),dtype=torch.float) # update count of q_b
+        
+        self.step = lambda x : 1/torch.pow(x,self.power)
+        self.r = 0
   
     def main(self):
-        with mlflow.start_run() as run:
-            for n in tqdm(range(self.n_ep),total=self.n_ep):
+        for n in tqdm(range(self.n_ep),total=self.n_ep):
 
-                state = self.env.reset()[0]
-                for i in range(self.horizon):
-
-                    self.visit_count[state] += 1
-                    epsilon = 1/torch.sqrt(self.visit_count[state])
+            state = self.env.reset()[0]
+            for i in range(self.horizon):
+                self.visit_count[state] += 1
+                epsilon = 1/torch.sqrt(self.visit_count[state])
+            
+                if random.random() < epsilon.item():
+                    action = self.env.action_space.sample()
+                else:
+                    action = torch.argmax(self.q_a[state] + self.q_b[state]).tolist()
                 
-                    if random.random() < epsilon.item():
-                        action = self.env.action_space.sample()
-                    else:
-                        action = torch.argmax(self.q_a[state] + self.q_b[state]).tolist()
+                nx_state,reward,done,trunc,_ = self.env.step(action) 
+                 
+                if random.random() > self.u_prob: 
+                    a = torch.argmax(self.q_a[nx_state]) # a*
+                    a_eval = self.q_b[nx_state,a] 
+
+                    pred = self.q_a[state,action]
+                    target = reward + (self.gamma * a_eval * (1-trunc))
+                    loss = target - pred
+
+                    self.n_a[state,action] +=1
+                    step_a = self.step(self.n_a[state,action])
+                    self.q_a[state,action] += (step_a * loss)
+                    assert torch.all(torch.isfinite(self.q_a)), f"{self.q_a[state]}"
+                else:
+                    b = torch.argmax(self.q_b[nx_state]) # b*
+                    b_eval = self.q_a[nx_state,b]
+
+                    pred = self.q_b[state,action]
+                    target = reward + (self.gamma * b_eval * (1-trunc))
+                    loss = target - pred
                     
-                    nx_state,reward,done,trunc,_ = self.env.step(action) 
-                     
-                    if random.random() > self.u_prob: 
-                        a = torch.argmax(self.q_a[nx_state]) # a*
-                        a_eval = self.q_b[nx_state,a] 
+                    self.n_b[state,action] += 1
+                    step_b = self.step(self.n_b[state,action])
+                    self.q_b[state,action] += (step_b * loss)
+                    assert torch.all(torch.isfinite(self.q_b)), f"{self.q_b[state]}"
 
-                        pred = self.q_a[state,action]
-                        target = reward + (self.gamma * a_eval * (1-done))
-                        loss = target - pred
+                state = nx_state
+                self.r += reward
+   
+                if trunc:
+                    break
 
-                        self.q_a[state,action] += (self.alpha * loss)
-                        assert torch.all(torch.isfinite(self.q_a)), f"{self.q_a[state]}"
-                    else:
-                        b = torch.argmax(self.q_b[nx_state]) # b*
-                        b_eval = self.q_a[nx_state,b]
-
-                        pred = self.q_b[state,action]
-                        target = reward + (self.gamma * b_eval * (1-done))
-                        loss = target - pred
-                        
-                        self.q_b[state,action] += (self.alpha * loss)
-                        assert torch.all(torch.isfinite(self.q_b)), f"{self.q_b[state]}"
-
-                    state = nx_state
-       
-                    if done or trunc:
-                        break
+            print(self.r)
+            self.r = 0
                                   
         return self.q_a,self.q_b
 
 
     def test(self):
         q_a,q_b = self.main()
-
         self.env = gym.make("CliffWalking-v1",render_mode="human")
         state = self.env.reset()[0]
         
@@ -90,6 +103,7 @@ class ddqn:
 
             if done or trunc:
                 break
+            
         
 if __name__ == "__main__":
     ddqn().test() 
