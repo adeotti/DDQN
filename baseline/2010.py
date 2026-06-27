@@ -90,7 +90,7 @@ class ddqn:
             self.r_data[n].copy_(self.r)
             self.r = 0
                                   
-        return self.q_a,self.q_b,[self.loss_data.tolist(),self.r_data.tolist()]
+        return self.q_a,self.q_b,list(map(torch.Tensor.tolist,([self.loss_data,self.r_data])))
 
 
     def test(self):
