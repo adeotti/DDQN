@@ -8,7 +8,8 @@ observation space : 48
 """
 
 import gymnasium as gym 
-import torch,sys,random,mlflow
+import torch,sys,random
+import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 
@@ -16,7 +17,6 @@ class ddqn:
     
     n_ep = 250     # number of episodes
     horizon = 200  # steps per episodes
-    epsilon = 0.1
     u_prob = 0.5   # update probability
     alpha = 0.3    # step size
     gamma = 0.98
@@ -34,8 +34,11 @@ class ddqn:
         self.n_a = torch.zeros((self.o_s,self.a_s),dtype=torch.float) # update count of q_a 
         self.n_b = torch.zeros((self.o_s,self.a_s),dtype=torch.float) # update count of q_b
         
-        self.step = lambda x : 1/torch.pow(x,self.power)
+        self.get_epsilon = lambda x : 1/torch.sqrt(x)
+        self.get_step = lambda x : 1/torch.pow(x,self.power)
         self.r = 0
+        self.r_data = []
+        self.loss_data = []
   
     def main(self):
         for n in tqdm(range(self.n_ep),total=self.n_ep):
@@ -43,7 +46,7 @@ class ddqn:
             state = self.env.reset()[0]
             for i in range(self.horizon):
                 self.visit_count[state] += 1
-                epsilon = 1/torch.sqrt(self.visit_count[state])
+                epsilon = self.get_epsilon(self.visit_count[state])
             
                 if random.random() < epsilon.item():
                     action = self.env.action_space.sample()
@@ -61,7 +64,7 @@ class ddqn:
                     loss = target - pred
 
                     self.n_a[state,action] +=1
-                    step_a = self.step(self.n_a[state,action])
+                    step_a = self.get_step(self.n_a[state,action])
                     self.q_a[state,action] += (step_a * loss)
                     assert torch.all(torch.isfinite(self.q_a)), f"{self.q_a[state]}"
                 else:
@@ -73,7 +76,7 @@ class ddqn:
                     loss = target - pred
                     
                     self.n_b[state,action] += 1
-                    step_b = self.step(self.n_b[state,action])
+                    step_b = self.get_step(self.n_b[state,action])
                     self.q_b[state,action] += (step_b * loss)
                     assert torch.all(torch.isfinite(self.q_b)), f"{self.q_b[state]}"
 
@@ -82,15 +85,16 @@ class ddqn:
    
                 if trunc:
                     break
-
-            print(self.r)
+            
+            self.loss_data.append(loss.item())
+            self.r_data.append(self.r) # tracking rewards per episodes
             self.r = 0
                                   
-        return self.q_a,self.q_b
+        return self.q_a,self.q_b,[self.loss_data,self.r_data]
 
 
     def test(self):
-        q_a,q_b = self.main()
+        q_a,q_b,logs = self.main()
         self.env = gym.make("CliffWalking-v1",render_mode="human")
         state = self.env.reset()[0]
         
