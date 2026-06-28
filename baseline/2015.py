@@ -144,10 +144,25 @@ class ddqn:
 
     
     def test(self):
-        pass
+        env = gym.make("ALE/MsPacman-v5",max_episode_steps=MAX_EP_STEPS,render_mode="human")
+        env = GrayscaleObservation(env)
+        env = ResizeObservation(env,R_SHAPE)
+        state = env.reset()
+        
+        policy = q_function()
+        policy.load_state_dict(torch.load("./")["q1 state"])
+
+        for n in range(500*10):
+            nx_s,reward,done,trunc,_ = env.step(policy(torch.tensor(state),dtype=torch.float).item())
+            state = s
+           
+        env.render()
+         if done or trunc:
+            break
+
 
 
 if __name__ == "__main__":
     import warnings
     warnings.filterwarnings("ignore")
-    ddqn("./").main()
+    ddqn("./").test()
