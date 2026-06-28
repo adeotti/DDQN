@@ -21,13 +21,13 @@ from tqdm import tqdm
 
 MAX_EP_STEPS = 500
 NUM_ENVS = 2#10
-R_SHAPE = (150,150)
+R_SHAPE = (100,100)
 # -
-EPSILON = 0.1
+EPSILON = 1 # todo : linear decay until 1 M and static until end of training
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 MAX_STEPS = 2_000 
 GAMMA = .99
-LR = int(2e-4)
+LR = 25e-5
 TAU = 0.5
 
 
@@ -43,27 +43,23 @@ def vec_env():
 class q_function(nn.Module):
     def __init__(self):  
         super().__init__()
-        self.c1 = nn.LazyConv2d( 64,1,1)
-        self.c2 = nn.LazyConv2d(128,3,2)
-        self.c3 = nn.LazyConv2d(128,3,2)
-        self.c4 = nn.LazyConv2d(128,3,2)
+        self.c1 = nn.LazyConv2d( 32,1,1)
+        self.c2 = nn.LazyConv2d(64,3,2)
+        self.c3 = nn.LazyConv2d(64,3,2)
 
-        self.l1 = nn.LazyLinear(2048)
-        self.l2 = nn.LazyLinear(1024)
-        self.l3 = nn.LazyLinear(512)
-        self.l4 = nn.LazyLinear(9)
+        self.l1 = nn.LazyLinear(1024)
+        self.l2 = nn.LazyLinear(512)
+        self.l3 = nn.LazyLinear(9)
 
     def forward(self,s):
-        x = F.silu(self.c1(s)) # B,64, 150, 150
-        x = F.silu(self.c2(x)) # B,128, 74, 74
-        x = F.silu(self.c3(x)) # B,128, 36, 36
-        x = F.silu(self.c4(x)) # B,128, 17, 17
+        x = F.silu(self.c1(s)) 
+        x = F.silu(self.c2(x)) 
+        x = F.silu(self.c3(x)) 
 
         x = F.silu(self.l1(x.flatten(1)))
         x = F.silu(self.l2(x))
         x = F.silu(self.l3(x))
-        x = self.l4(x)
-        return F.softmax(x,-1) 
+        return x
 
 
 class ddqn:
@@ -71,7 +67,7 @@ class ddqn:
         self.storage_path = storage_path
         self.env = vec_env()
   
-        q_function()(torch.randint(0,255,(NUM_ENVS,1,150,150),dtype=torch.float)) # init
+        q_function()(torch.randint(0,255,(NUM_ENVS,1,*R_SHAPE),dtype=torch.float)) # init
         self.q1 = q_function()
         self.target_net = deepcopy(self.q1)
         self.buffer = deque(maxlen=MAX_EP_STEPS)
@@ -154,11 +150,11 @@ class ddqn:
 
         for n in range(500*10):
             nx_s,reward,done,trunc,_ = env.step(policy(torch.tensor(state),dtype=torch.float).item())
-            state = s
+            state = nx_state
            
-        env.render()
-         if done or trunc:
-            break
+            env.render()
+            if done or trunc:
+                break
 
 
 
