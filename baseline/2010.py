@@ -3,8 +3,7 @@ Double Q-learning (Hasselt, 2010)
 https://papers.nips.cc/paper_files/paper/2010/hash/091d584fced301b442654dd8c23b3fc9-Abstract.html
 
 environment : cliff walking
-action space : 4
-observation space : 48
+https://gymnasium.farama.org/environments/toy_text/cliff_walking/
 """
 
 import gymnasium as gym 
