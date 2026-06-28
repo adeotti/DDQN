@@ -9,21 +9,18 @@ import ale_py
 from gymnasium.vector.async_vector_env import AsyncVectorEnv
 from gymnasium.wrappers.transform_observation import GrayscaleObservation,ResizeObservation
 
-import numpy as np
-import torch,sys,random
+import torch,sys,random,mlflow
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributions import Categorical
 
 from copy import deepcopy
 from collections import deque
-from dataclasses import dataclass
 from itertools import chain
 from tqdm import tqdm
 
 
 MAX_EP_STEPS = 500
-NUM_ENVS = 2#20
+NUM_ENVS = 2#10
 R_SHAPE = (150,150)
 # -
 EPSILON = 0.1
@@ -71,75 +68,86 @@ class q_function(nn.Module):
 
 class ddqn:
     def __init__(self,storage_path=None):
+        self.storage_path = storage_path
         self.env = vec_env()
   
-        q_function()(torch.randint(0,1255,(NUM_ENVS,1,150,150),dtype=torch.float,device=DEVICE))
+        q_function()(torch.randint(0,255,(NUM_ENVS,1,150,150),dtype=torch.float)) # init
         self.q1 = q_function()
         self.target_net = deepcopy(self.q1)
         self.buffer = deque(maxlen=MAX_EP_STEPS)
 
         self.q1.to(DEVICE) 
         self.target_net.to(DEVICE) 
-        # self.q1.compile()
-        # self.target_net.compile()
+        self.q1.compile()
+        self.target_net.compile()
 
         self.optim = torch.optim.Adam(chain(self.q1.parameters(),self.target_net.parameters()),lr=LR)
         self.to_tensor = lambda x : torch.tensor(x,dtype=torch.float,device=DEVICE)
+        self.reward_data = torch.zeros(NUM_ENVS,dtype=torch.float)
     
-    def save(self,storage_path):
+    def save(self,n):
         data = {
             "q1 state":self.q1.state_dict(),
-            "target net state":self.q2.state_dict(),
+            "target net state":self.target_net.state_dict(),
             "optim state":self.optim.state_dict()
         }
-        torch.save(data,f"{storage_path}/state_{n}.pth")
+        torch.save(data,f"{self.storage_path}/state_{n}.pth")
     
     def main(self):
-        self.state = torch.tensor(self.env.reset()[0],dtype=torch.float,device=DEVICE).unsqueeze(1)
-        for n in tqdm(range(MAX_STEPS),total=MAX_STEPS):
+        with mlflow.start_run() as run:
 
-            for i in range(MAX_EP_STEPS):
-                with torch.no_grad():
-                    if random.random() < EPSILON : action = self.env.action_space.sample()
-                    else : action = torch.argmax(self.q1(self.state),dim=1).tolist()
+            self.state = torch.tensor(self.env.reset()[0],dtype=torch.float,device=DEVICE).unsqueeze(1)
+            for n in tqdm(range(MAX_STEPS),total=MAX_STEPS):
+
+                for i in range(MAX_EP_STEPS):
+                    with torch.no_grad():
+                        if random.random() < EPSILON : action = self.env.action_space.sample()
+                        else : action = torch.argmax(self.q1(self.state),dim=1).tolist()
+                        
+                        nx_state,reward,done,trunc,_ = self.env.step(action)
+                        self.reward_data += reward
+                        
+                        data = [self.state,nx_state,reward,done] 
+                        data = list(map(self.to_tensor,data))
+                        self.buffer.append(data)
+                        
+                        self.state = torch.tensor(nx_state,dtype=torch.float,device=DEVICE).unsqueeze(1)
+            
+                for t in range(MAX_EP_STEPS):
+                    id_ = random.randint(0,MAX_EP_STEPS-1)
+                    s,nx,r,d = self.buffer[id_] # s : state, nx : state t+1, r : reward, d : done
+                    nx = nx.unsqueeze(1)
+                    a = torch.argmax(self.q1(nx),1).unsqueeze(0) 
                     
-                    nx_state,reward,done,trunc,_ = self.env.step(action)
+                    q_target_values = self.target_net(nx) # eval of a using target net
+                    eval_ = torch.gather(q_target_values,1,a)
+                    target = r + (GAMMA * eval_ * (1-d))
+
+                    pred = torch.argmax(self.q1(s),1).float()
+
+                    loss = F.mse_loss(pred,target).mean()
+          
+                    self.optim.zero_grad(set_to_none=True)
+                    loss.backward()
+                    self.optim.step()
                     
-                    data = [self.state,nx_state,reward,done] 
-                    data = list(map(self.to_tensor,data))
-                    self.buffer.append(data)
-                    
-                    self.state = torch.tensor(nx_state,dtype=torch.float,device=DEVICE).unsqueeze(1)
-                    # todo : handle end of episodes transitions
+                    # polyak averaging
+                    for q1_params,q_target_params in zip(self.q1.parameters(),self.target_net.parameters()):
+                        q_target_params.data.mul_(1.0 - TAU).add_(q1_params.data,alpha=TAU)
 
-            for t in range(MAX_EP_STEPS):
-                id_ = random.randint(0,MAX_EP_STEPS)
-                s,nx,r,d = self.buffer[id_] # s : state, nx : state t+1, r : reward, d : done
-                nx = nx.unsqueeze(1)
-                a = torch.argmax(self.q1(nx),1).unsqueeze(0) 
-                
-                q_target_values = self.target_net(nx) # eval of a using target net
-                eval_ = torch.gather(q_target_values,1,a)
-                target = r + (GAMMA * eval_ * (1-d))
+                if n%100 == 0:
+                    self.save(n) 
+                    mlflow.log_metrics({
+                        "average reward":self.reward_data.mean().item(),
+                        "loss":loss.item(),
+                    },step=n)
 
-                pred = torch.argmax(self.q1(s),1).float()
-
-                loss = F.mse_loss(pred,target).mean()
-      
-                self.optim.zero_grad(set_to_none=True)
-                loss.backward()
-                self.optim.step()
-                
-                # polyak averaging
-                for q1_params,q_target_params in zip(self.q1.parameters(),self.target_net.parameters()):
-                    q_target_params.data.mul_(1.0 - TAU).add_(q1_params.data,alpha=TAU)
     
-            if n%100== 0:
-                self.save(n) # state dicts saving
-
+    def test(self):
+        pass
 
 
 if __name__ == "__main__":
     import warnings
     warnings.filterwarnings("ignore")
-    ddqn().main()
+    ddqn("./").main()
