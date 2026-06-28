@@ -12,8 +12,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 
-class ddqn:
-    
+class dql:
     n_ep = 600     # number of episodes
     horizon = 150  # steps per episodes
     u_prob = 0.5   # update probability
@@ -115,4 +114,4 @@ class ddqn:
             
         
 if __name__ == "__main__":
-    ddqn().test() 
+    dql().test() 
