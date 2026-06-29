@@ -29,6 +29,8 @@ MAX_STEPS = 2_000
 GAMMA = .99
 LR = 25e-5
 TAU = 0.5
+BATCH_SIZE = 32
+NUM_UPDATE = 1000
 
 
 def vec_env():
@@ -74,8 +76,8 @@ class ddqn:
 
         self.q1.to(DEVICE) 
         self.target_net.to(DEVICE) 
-        self.q1.compile()
-        self.target_net.compile()
+        #self.q1.compile()
+        #self.target_net.compile()
 
         self.optim = torch.optim.Adam(chain(self.q1.parameters(),self.target_net.parameters()),lr=LR)
         self.to_tensor = lambda x : torch.tensor(x,dtype=torch.float,device=DEVICE)
@@ -103,30 +105,32 @@ class ddqn:
                         nx_state,reward,done,trunc,_ = self.env.step(action)
                         self.reward_data += reward
                         
-                        data = [self.state,nx_state,reward,done] 
+                        data = [self.state,nx_state,reward,done,action] 
                         data = list(map(self.to_tensor,data))
                         self.buffer.append(data)
                         
                         self.state = torch.tensor(nx_state,dtype=torch.float,device=DEVICE).unsqueeze(1)
             
-                for t in range(MAX_EP_STEPS):
-                    id_ = random.randint(0,MAX_EP_STEPS-1)
-                    s,nx,r,d = self.buffer[id_] # s : state, nx : state t+1, r : reward, d : done
-                    nx = nx.unsqueeze(1)
-                    a = torch.argmax(self.q1(nx),1).unsqueeze(0) 
-                    
-                    q_target_values = self.target_net(nx) # eval of a using target net
-                    eval_ = torch.gather(q_target_values,1,a)
-                    target = r + (GAMMA * eval_ * (1-d))
-
-                    pred = torch.argmax(self.q1(s),1).float()
-
-                    loss = F.mse_loss(pred,target).mean()
+                for t in range(MAX_EP_STEPS):# update every 4 steps
+                    # todo : batch items
+                    id_ = random.randint(0,500-1)
+                    s,nx,r,d,a = self.buffer[id_] # s : state, nx : state t+1, r : reward, d : done, a : action
+                
+                    pred_q = self.q1(s).gather(1,a.unsqueeze(0).long()).squeeze()
+                
+                    with torch.no_grad(): # target q computation
+                        # prediciton using q1 -> eval of q1 prediction using Q target -> TD(0) 
+                        nx_action = torch.argmax(self.q1(nx.unsqueeze(1)),1).unsqueeze(0)
+                        eval_ = self.target_net(nx.unsqueeze(1)).gather(1,nx_action).squeeze()
+                        target = r + GAMMA * eval_ * (1-d)
+            
+                    loss = F.mse_loss(pred_q,target).mean()
           
                     self.optim.zero_grad(set_to_none=True)
                     loss.backward()
                     self.optim.step()
                     
+                    # TODO : add frequency (every 10k steps)
                     # polyak averaging
                     for q1_params,q_target_params in zip(self.q1.parameters(),self.target_net.parameters()):
                         q_target_params.data.mul_(1.0 - TAU).add_(q1_params.data,alpha=TAU)
@@ -161,4 +165,4 @@ class ddqn:
 if __name__ == "__main__":
     import warnings
     warnings.filterwarnings("ignore")
-    ddqn("./").test()
+    ddqn("./").main()
