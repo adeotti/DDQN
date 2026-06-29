@@ -30,8 +30,8 @@ GAMMA = .99
 LR = 25e-5
 TAU = 0.5
 BATCH_SIZE = 32
-Q1_NET_UPDATE_FREQ = MAX_EP_STEPS / 4 # update very four steps 
-TARGET_NET_UPDATE_FREQ = int(10e3)
+Q1_NET_UPDATE_FREQ = MAX_EP_STEPS / 4 # update q1 weights every 4 steps 
+TARGET_NET_UPDATE_FREQ = int(10e3)    # update q target weights every 10k steps
 
 
 def vec_env():
@@ -114,7 +114,7 @@ class ddqn:
                         self.state = torch.tensor(nx_state,dtype=torch.float,device=DEVICE).unsqueeze(1)
                         self.step_count += 1
             
-                for t in range(Q1_NET_UPDATE_FREQ):# update every 4 steps
+                for t in range(Q1_NET_UPDATE_FREQ):
                     # TODO : batch items
                     id_ = random.randint(0,500-1)
                     s,nx,r,d,a = self.buffer[id_] # s : state, nx : state t+1, r : reward, d : done, a : action
@@ -136,7 +136,7 @@ class ddqn:
                 if self.step_count % TARGET_NET_UPDATE_FREQ == 0: # update target net every 10k steps
                     self.q_target.load_state_dict(self.q1.state_dict())
                         
-                if n%100 == 0:
+                if n % 1_000 == 0:
                     self.save(n) 
                     mlflow.log_metrics({
                         "average reward":self.reward_data.mean().item(),
