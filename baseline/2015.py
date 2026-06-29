@@ -30,7 +30,8 @@ GAMMA = .99
 LR = 25e-5
 TAU = 0.5
 BATCH_SIZE = 32
-NUM_UPDATE = 1000
+Q1_NET_UPDATE_FREQ = MAX_EP_STEPS / 4 # update very four steps 
+TARGET_NET_UPDATE_FREQ = int(10e3)
 
 
 def vec_env():
@@ -82,6 +83,7 @@ class ddqn:
         self.optim = torch.optim.Adam(chain(self.q1.parameters(),self.target_net.parameters()),lr=LR)
         self.to_tensor = lambda x : torch.tensor(x,dtype=torch.float,device=DEVICE)
         self.reward_data = torch.zeros(NUM_ENVS,dtype=torch.float)
+        self.step_count = 0
     
     def save(self,n):
         data = {
@@ -110,9 +112,10 @@ class ddqn:
                         self.buffer.append(data)
                         
                         self.state = torch.tensor(nx_state,dtype=torch.float,device=DEVICE).unsqueeze(1)
+                        self.step_count += 1
             
-                for t in range(MAX_EP_STEPS):# update every 4 steps
-                    # todo : batch items
+                for t in range(Q1_NET_UPDATE_FREQ):# update every 4 steps
+                    # TODO : batch items
                     id_ = random.randint(0,500-1)
                     s,nx,r,d,a = self.buffer[id_] # s : state, nx : state t+1, r : reward, d : done, a : action
                 
@@ -130,11 +133,9 @@ class ddqn:
                     loss.backward()
                     self.optim.step()
                     
-                    # TODO : add frequency (every 10k steps)
-                    # polyak averaging
-                    for q1_params,q_target_params in zip(self.q1.parameters(),self.target_net.parameters()):
-                        q_target_params.data.mul_(1.0 - TAU).add_(q1_params.data,alpha=TAU)
-
+                if self.step_count % TARGET_NET_UPDATE_FREQ == 0: # update target net every 10k steps
+                    self.q_target.load_state_dict(self.q1.state_dict())
+                        
                 if n%100 == 0:
                     self.save(n) 
                     mlflow.log_metrics({
