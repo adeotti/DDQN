@@ -25,13 +25,13 @@ R_SHAPE = (100,100)
 # -
 EPSILON = 1 # todo : linear decay until 1 M and static until end of training
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-MAX_STEPS = 2_000 
+MAX_STEPS = 2_000 # int(5e5)
 GAMMA = .99
 LR = 25e-5
 TAU = 0.5
 BATCH_SIZE = 32
-Q1_NET_UPDATE_FREQ = MAX_EP_STEPS / 4 # update q1 weights every 4 steps 
-TARGET_NET_UPDATE_FREQ = int(10e3)    # update q target weights every 10k steps
+Q1_NET_UPDATE_FREQ = MAX_EP_STEPS // 4 # update q1 weights every 4 steps 
+TARGET_NET_UPDATE_FREQ = int(10e3)     # update q target weights every 10k steps
 
 
 def vec_env():
@@ -65,6 +65,17 @@ class q_function(nn.Module):
         return x
 
 
+class __epsilon_decay:
+    def __init__():
+        pass
+
+    def step(self):
+        pass
+        
+    def __call__():
+        pass
+
+
 class ddqn:
     def __init__(self,storage_path=None):
         self.storage_path = storage_path
@@ -92,12 +103,15 @@ class ddqn:
             "optim state":self.optim.state_dict()
         }
         torch.save(data,f"{self.storage_path}/state_{n}.pth")
+
     
     def main(self):
         with mlflow.start_run() as run:
 
             self.state = torch.tensor(self.env.reset()[0],dtype=torch.float,device=DEVICE).unsqueeze(1)
             for n in tqdm(range(MAX_STEPS),total=MAX_STEPS):
+                
+                b_state,b_nx_state,b_reward,b_done,b_action = [],[],[],[],[]
 
                 for i in range(MAX_EP_STEPS):
                     with torch.no_grad():
@@ -107,19 +121,31 @@ class ddqn:
                         nx_state,reward,done,trunc,_ = self.env.step(action)
                         self.reward_data += reward
                         
-                        data = [self.state,nx_state,reward,done,action] 
-                        data = list(map(self.to_tensor,data))
-                        self.buffer.append(data)
+                        b_state.append(self.state)
+                        b_nx_state.append(nx_state)
+                        b_reward.append(reward) 
+                        b_done.append(done) 
+                        b_action.append(action)
                         
                         self.state = torch.tensor(nx_state,dtype=torch.float,device=DEVICE).unsqueeze(1)
                         self.step_count += 1
-            
-                for t in range(Q1_NET_UPDATE_FREQ):
-                    # TODO : batch items
-                    id_ = random.randint(0,500-1)
-                    s,nx,r,d,a = self.buffer[id_] # s : state, nx : state t+1, r : reward, d : done, a : action
+
+                b_state = torch.stack(list(map(self.to_tensor,b_state))).squeeze()
+                b_nx_state  = torch.stack(list(map(self.to_tensor,b_nx_state))).squeeze()
+                b_reward = torch.stack(list(map(self.to_tensor,b_reward)))
+                b_done = torch.stack(list(map(self.to_tensor,b_done)))
+                b_action = torch.stack(list(map(self.to_tensor,b_action)))
                 
-                    pred_q = self.q1(s).gather(1,a.unsqueeze(0).long()).squeeze()
+                for t in range(Q1_NET_UPDATE_FREQ):
+                    # sampling
+                    idx = torch.randperm(BATCH_SIZE)
+                    s_state = b_state[idx]
+                    s_nx_state = b_nx_state[idx]
+                    s_reward = b_reward[idx]
+                    s_done = b_done[idx]
+                    s_action = b_action[idx]
+
+                    pred_q = self.q1(s_state).gather(1,a.unsqueeze(0).long()).squeeze()
                 
                     with torch.no_grad(): # target q computation
                         # prediciton using q1 -> eval of q1 prediction using Q target -> TD(0) 
@@ -162,8 +188,10 @@ class ddqn:
                 break
 
 
-
-if __name__ == "__main__":
-    import warnings
-    warnings.filterwarnings("ignore")
+if __name__ == "__main__": 
+    import warnings,logging
+    warnings.filterwarnings("ignore"logging.disable(logging.CRITICAL))
+    logging.disable(logging.CRITICAL)
     ddqn("./").main()
+ 
+
