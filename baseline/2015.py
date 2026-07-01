@@ -143,9 +143,9 @@ class ddqn:
                     s_nx_state = b_nx_state[idx]
                     s_reward = b_reward[idx]
                     s_done = b_done[idx]
-                    s_action = b_action[idx]
-
-                    pred_q = self.q1(s_state).gather(1,a.unsqueeze(0).long()).squeeze()
+                    s_action = b_action[idx].long()
+                    
+                    pred_q = self.q1(s_state).gather(1,s_action).squeeze()
                 
                     with torch.no_grad(): # target q computation
                         # prediciton using q1 -> eval of q1 prediction using Q target -> TD(0) 
@@ -190,8 +190,7 @@ class ddqn:
 
 if __name__ == "__main__": 
     import warnings,logging
-    warnings.filterwarnings("ignore"logging.disable(logging.CRITICAL))
-    logging.disable(logging.CRITICAL)
+    warnings.filterwarnings("ignore") ; logging.disable(logging.CRITICAL)
     ddqn("./").main()
  
 
