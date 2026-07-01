@@ -147,11 +147,11 @@ class ddqn:
                     
                     pred_q = self.q1(s_state).gather(1,s_action).squeeze()
                 
-                    with torch.no_grad(): # target q computation
+                    with torch.no_grad(): # target q
                         # prediciton using q1 -> eval of q1 prediction using Q target -> TD(0) 
-                        nx_action = torch.argmax(self.q1(nx.unsqueeze(1)),1).unsqueeze(0)
-                        eval_ = self.target_net(nx.unsqueeze(1)).gather(1,nx_action).squeeze()
-                        target = r + GAMMA * eval_ * (1-d)
+                        nx_action = torch.argmax(self.q1(s_nx_state),1).unsqueeze(-1)
+                        eval_ = self.target_net(s_nx_state).gather(1,nx_action) 
+                        target = s_reward + GAMMA * eval_ * (1-s_done)
             
                     loss = F.mse_loss(pred_q,target).mean()
           
