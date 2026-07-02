@@ -23,7 +23,6 @@ MAX_EP_STEPS = 500
 NUM_ENVS = 2#10
 R_SHAPE = (100,100)
 # -
-EPSILON = 1 # todo : linear decay until 1 M and static until end of training
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 MAX_STEPS = 2_000 # int(5e5)
 GAMMA = .99
@@ -65,17 +64,6 @@ class q_function(nn.Module):
         return x
 
 
-class __epsilon_decay:
-    def __init__():
-        pass
-
-    def step(self):
-        pass
-        
-    def __call__():
-        pass
-
-
 class ddqn:
     def __init__(self,storage_path=None):
         self.storage_path = storage_path
@@ -115,7 +103,10 @@ class ddqn:
 
                 for i in range(MAX_EP_STEPS):
                     with torch.no_grad():
-                        if random.random() < EPSILON : action = self.env.action_space.sample()
+                        decay_fraction = min(n/int(1e6),1) # Linearly decay epsilon from 1 to 0.1 over 1M steps
+                        epsilon = 1 - (1 - 0.1) * decay_fraction
+
+                        if random.random() < epsilon : action = self.env.action_space.sample()
                         else : action = torch.argmax(self.q1(self.state),dim=1).tolist()
                         
                         nx_state,reward,done,trunc,_ = self.env.step(action)
@@ -192,5 +183,7 @@ if __name__ == "__main__":
     import warnings,logging
     warnings.filterwarnings("ignore") ; logging.disable(logging.CRITICAL)
     ddqn("./").main()
+
+
  
 
