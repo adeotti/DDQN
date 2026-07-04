@@ -24,10 +24,9 @@ NUM_ENVS = 2#10
 R_SHAPE = (100,100)
 # -
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-MAX_STEPS = 2_000 # int(5e5)
+MAX_STEPS = 7_000 
 GAMMA = .99
 LR = 25e-5
-TAU = 0.5
 BATCH_SIZE = 32
 Q1_NET_UPDATE_FREQ = MAX_EP_STEPS // 4 # update q1 weights every 4 steps 
 TARGET_NET_UPDATE_FREQ = int(10e3)     # update q target weights every 10k steps
@@ -121,11 +120,16 @@ class ddqn:
                         self.state = torch.tensor(nx_state,dtype=torch.float,device=DEVICE).unsqueeze(1)
                         self.step_count += 1
 
-                b_state = torch.stack(list(map(self.to_tensor,b_state))).squeeze()
-                b_nx_state  = torch.stack(list(map(self.to_tensor,b_nx_state))).squeeze()
-                b_reward = torch.stack(list(map(self.to_tensor,b_reward)))
-                b_done = torch.stack(list(map(self.to_tensor,b_done)))
-                b_action = torch.stack(list(map(self.to_tensor,b_action)))
+              
+                b_state = torch.stack(list(map(self.to_tensor, b_state)))
+                b_state = b_state.reshape(-1, 1, *R_SHAPE)                      # (steps*envs, 1, 100, 100)
+
+                b_nx_state = torch.stack(list(map(self.to_tensor, b_nx_state))) 
+                b_nx_state = b_nx_state.unsqueeze(2).reshape(-1, 1, *R_SHAPE)   # (steps*envs, 1, 100, 100)
+
+                b_reward = torch.stack(list(map(self.to_tensor, b_reward))).reshape(-1)     # (steps*envs,)
+                b_done   = torch.stack(list(map(self.to_tensor, b_done))).reshape(-1)       # (steps*envs,)
+                b_action = torch.stack(list(map(self.to_tensor, b_action))).reshape(-1, 1)  # (steps*envs, 1)
                 
                 for t in range(Q1_NET_UPDATE_FREQ):
                     # sampling
@@ -151,7 +155,7 @@ class ddqn:
                     self.optim.step()
                     
                 if self.step_count % TARGET_NET_UPDATE_FREQ == 0: # update target net every 10k steps
-                    self.q_target.load_state_dict(self.q1.state_dict())
+                    self.target_net.load_state_dict(self.q1.state_dict())
                         
                 if n % 1_000 == 0:
                     self.save(n) 
@@ -183,7 +187,3 @@ if __name__ == "__main__":
     import warnings,logging
     warnings.filterwarnings("ignore") ; logging.disable(logging.CRITICAL)
     ddqn("./").main()
-
-
- 
-
