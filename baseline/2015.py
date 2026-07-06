@@ -75,11 +75,10 @@ class ddqn:
 
         self.q1.to(DEVICE) 
         self.target_net.to(DEVICE) 
-        #self.q1.compile()
-        #self.target_net.compile()
+        self.q1.compile()
+        self.target_net.compile()
 
         self.optim = torch.optim.Adam(chain(self.q1.parameters(),self.target_net.parameters()),lr=LR)
-        self.to_tensor = lambda x : torch.tensor(x,dtype=torch.float,device=DEVICE)
         self.reward_data = torch.zeros(NUM_ENVS,dtype=torch.float)
         self.step_count = 0
     
@@ -90,6 +89,12 @@ class ddqn:
             "optim state":self.optim.state_dict()
         }
         torch.save(data,f"{self.storage_path}/state_{n}.pth")
+
+
+    def stack__(self,x):
+        x = torch.tensor(x,dtype=torch.float,device=DEVICE)
+        x = torch.stack(x)
+        return x
 
     
     def main(self):
@@ -121,15 +126,15 @@ class ddqn:
                         self.step_count += 1
 
               
-                b_state = torch.stack(list(map(self.to_tensor, b_state)))
-                b_state = b_state.reshape(-1, 1, *R_SHAPE)                      # (steps*envs, 1, 100, 100)
+                b_state = self.stack__(b_state)
+                b_state = b_state.reshape(-1,1,*R_SHAPE)  # (steps*envs,1,R_SHAPE)
 
-                b_nx_state = torch.stack(list(map(self.to_tensor, b_nx_state))) 
-                b_nx_state = b_nx_state.unsqueeze(2).reshape(-1, 1, *R_SHAPE)   # (steps*envs, 1, 100, 100)
+                b_nx_state = self.stack__(b_nx_state)
+                b_nx_state = b_nx_state.unsqueeze(2).reshape(-1,1,*R_SHAPE) # (steps*envs,1,R_SHAPE)
 
-                b_reward = torch.stack(list(map(self.to_tensor, b_reward))).reshape(-1)     # (steps*envs,)
-                b_done   = torch.stack(list(map(self.to_tensor, b_done))).reshape(-1)       # (steps*envs,)
-                b_action = torch.stack(list(map(self.to_tensor, b_action))).reshape(-1, 1)  # (steps*envs, 1)
+                b_reward = self.stack__(b_reward).reshape(-1)    # (steps*envs,)
+                b_done   = self.stack__(b_done))).reshape(-1)    # (steps*envs,)
+                b_action = self.stack__(b_action).reshape(-1, 1) # (steps*envs,1)
                 
                 for t in range(Q1_NET_UPDATE_FREQ):
                     # sampling
@@ -169,14 +174,17 @@ class ddqn:
         env = gym.make("ALE/MsPacman-v5",max_episode_steps=MAX_EP_STEPS,render_mode="human")
         env = GrayscaleObservation(env)
         env = ResizeObservation(env,R_SHAPE)
-        state = env.reset()
+        state = env.reset()[0]
         
+        q_function()(torch.randint(0,255,(1,1,*R_SHAPE),dtype=torch.float))
         policy = q_function()
-        policy.load_state_dict(torch.load("./")["q1 state"])
+        checkpoint = torch.load("./state_4000.pth", map_location=torch.device("cpu"))
+        policy.load_state_dict(checkpoint["q1 state"])
 
         for n in range(500*10):
-            nx_s,reward,done,trunc,_ = env.step(policy(torch.tensor(state),dtype=torch.float).item())
-            state = nx_state
+            state = torch.tensor(state,dtype=torch.float).unsqueeze(0).unsqueeze(0) 
+            nx_s,reward,done,trunc,_ = env.step(torch.argmax(policy(state)).item())
+            state = nx_s
            
             env.render()
             if done or trunc:
@@ -186,4 +194,4 @@ class ddqn:
 if __name__ == "__main__": 
     import warnings,logging
     warnings.filterwarnings("ignore") ; logging.disable(logging.CRITICAL)
-    ddqn("./").main()
+    ddqn("./").test()
