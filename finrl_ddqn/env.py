@@ -29,8 +29,20 @@ class env_hypers_params():
     state_dim = 145
     reward_scale = 1e-2
     
-
 hypers = env_hypers_params()
+
+env_configs = { # base environment parameters
+    "hmax":hypers.hmax,
+    "initial_amount":hypers.init_amount,
+    "state_space":hypers.state_dim,
+    "action_space":12,
+    "reward_scaling":hypers.reward_scale,
+    "num_stock_shares":[0]*12,
+    "buy_cost_pct":[0.001]*12,
+    "sell_cost_pct":[0.001]*12,
+    "stock_dim":12,
+    "tech_indicator_list":hypers.indicators,
+}
 
 def __process_data():
     x = YahooDownloader(hypers.start_date,hypers.end_date,hypers.ticker_list)
@@ -50,27 +62,15 @@ def __process_data():
     assert len(train_data) + len(test_data) == len(info)
     return train_data,test_data
 
-def __build_train_env():
-    train_data,_ = __process_data()
 
-    x = StockTradingEnv(
-        df = train_data,
-        hmax = hypers.hmax,
-        initial_amount = hypers.init_amount,
-        state_space = hypers.state_dim,
-        action_space = 12,
-        reward_scaling = hypers.reward_scale,
-        num_stock_shares = [0]*12,
-        buy_cost_pct = [0.001]*12,
-        sell_cost_pct = [0.001]*12,
-        stock_dim = 12,
-        tech_indicator_list = hypers.indicators,
-    ) 
-    return x
+def __build_train_env(): # -> [instance for training env,instance for testing env]
+    train_data,test_data = __process_data()
+
+    x_train = StockTradingEnv(df=train_data,**env_configs) 
+    x_test = StockTradingEnv(df=test_data,**env_configs)  
+    return x_train,x_test 
+
     
-
 if __name__ == "__main__":
-    env = __build_train_env() 
-    print(len(env.reset()[0]))
-    print(env.action_space)
+    pass
     
