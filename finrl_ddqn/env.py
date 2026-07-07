@@ -44,27 +44,30 @@ env_configs = { # base environment parameters
     "tech_indicator_list":hypers.indicators,
 }
 
-def __process_data():
+def _process_data():
     x = YahooDownloader(hypers.start_date,hypers.end_date,hypers.ticker_list)
     x = x.fetch_data()
     fe = FeatureEngineer(True,hypers.indicators,use_vix=True) 
     info = fe.preprocess_data(x)
     info.fillna(0,inplace=True)
-    #-
-    info = info.sort_values(["date", "tic"])
+
+    info = info.sort_values(["date","tic"])
     info = info.reset_index(drop=True)
     info.index = info.date.factorize()[0]
-    # -
+    
     total_row = len(info)
     train_len = int(total_row * 0.8)  # train/test ratio = 80/20
-    train_data = info.iloc[:train_len]
-    test_data = info.iloc[train_len:]
+    train_data = info.iloc[:train_len].copy()
+    test_data = info.iloc[train_len:].copy()
     assert len(train_data) + len(test_data) == len(info)
+
+    train_data.index = train_data.date.factorize()[0]
+    test_data.index = test_data.date.factorize()[0]
     return train_data,test_data
 
 
-def __build_train_env(): # -> [instance for training env,instance for testing env]
-    train_data,test_data = __process_data()
+def _build_env(): # -> [instance for training env,instance for testing env]
+    train_data,test_data = _process_data()
 
     x_train = StockTradingEnv(df=train_data,**env_configs) 
     x_test = StockTradingEnv(df=test_data,**env_configs)  
