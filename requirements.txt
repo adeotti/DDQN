@@ -1,0 +1,14 @@
+# py 3.10 
+
+gymnasium==1.2.3
+mlflow==3.8.1
+numpy==2.2.6
+ale-py==0.12.0
+
+# gymnasium might need opencv : pip install opencv-python
+
+# FinRL installation 
+# https://finrl.readthedocs.io/en/latest/start/installation.html#prepare-for-install 
+#    git clone https://github.com/AI4Finance-Foundation/FinRL.git
+#    cd FinRL
+#    pip install .
