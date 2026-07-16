@@ -10,7 +10,7 @@ from gymnasium.vector.async_vector_env import AsyncVectorEnv
 from gymnasium.wrappers.transform_observation import GrayscaleObservation,ResizeObservation
 from gymnasium.wrappers import FrameStackObservation
 
-import torch,sys,random,mlflow,os
+import torch,sys,random,mlflow,os,time
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -79,7 +79,7 @@ class ddqn:
         self.storage_path = storage_path
         self.env = vec_env()
         channels = self.env.observation_space.shape[1]
-  
+    
         q_function()(torch.randint(0,255,(NUM_ENVS,channels,*R_SHAPE),dtype=torch.float))
         self.q1 = q_function()
         self.target_net = deepcopy(self.q1)
@@ -113,7 +113,7 @@ class ddqn:
 
 
     def stack__(self,x):
-        x = [torch.tensor(item, dtype=torch.float, device=DEVICE) for item in x]
+        x = [torch.tensor(item, dtype=torch.float) for item in x]
         x = torch.stack(x)
         return x
 
@@ -161,11 +161,8 @@ class ddqn:
             a = [item[4] for item in episode]
             
             # batching
-            b_state = self.stack__(s)
-            b_state = b_state.reshape(-1,1,*R_SHAPE)  # (steps*envs,1,R_SHAPE)
-
-            b_nx_state = self.stack__(nx)
-            b_nx_state = b_nx_state.unsqueeze(2).reshape(-1,1,*R_SHAPE) # (steps*envs,1,R_SHAPE)
+            b_state = self.stack__(s).flatten(0,1) 
+            b_nx_state = self.stack__(nx).flatten(0,1)
 
             b_reward = self.stack__(r).reshape(-1)    # (steps*envs,)
             b_done   = self.stack__(d).reshape(-1)    # (steps*envs,)
@@ -180,41 +177,43 @@ class ddqn:
             s_action = b_action[idx].long().to(DEVICE)
 
             sample = (s_state,s_nx_state,s_reward,s_done,s_action)
-            self.gpu_stream.put(sample)
+
+            self.gpu_stream.put(sample) 
             
     
     def main(self):
         mlflow.set_experiment("pacman")
         with mlflow.start_run() as run:
 
-            if self.gpu_stream.qsize() > 10:
+            while self.gpu_stream.qsize() <= 3:
+                time.sleep(0.1)
 
-                for t in tqdm(range(Q1_NET_UPDATE_FREQ,total=Q1_NET_UPDATE_FREQ)):
-                    s_state,s_nx_state,s_reward,s_done,s_action = self.gpu_stream.get() 
-                                      
-                    pred_q = self.q1(s_state).gather(1,s_action).squeeze()
+            for t in tqdm(range(Q1_NET_UPDATE_FREQ),total=Q1_NET_UPDATE_FREQ):    
+                s_state,s_nx_state,s_reward,s_done,s_action = self.gpu_stream.get() 
+                               
+                pred_q = self.q1(s_state).gather(1,s_action).squeeze()
                 
-                    with torch.no_grad(): # target q
-                        # prediciton using q1 -> eval of q1 prediction using Q target -> TD(0) 
-                        nx_action = torch.argmax(self.q1(s_nx_state),1).unsqueeze(-1)
-                        eval_ = self.target_net(s_nx_state).gather(1,nx_action) 
-                        target = s_reward + GAMMA * eval_ * (1-s_done)
+                with torch.no_grad(): # target q
+                    # prediciton using q1 -> eval of q1 prediction using Q target -> TD(0) 
+                    nx_action = torch.argmax(self.q1(s_nx_state),1).unsqueeze(-1)
+                    eval_ = self.target_net(s_nx_state).gather(1,nx_action) 
+                    target = s_reward + GAMMA * eval_ * (1-s_done)
             
-                    loss = F.mse_loss(pred_q,target).mean()
+                loss = F.mse_loss(pred_q,target).mean()
           
-                    self.optim.zero_grad(set_to_none=True)
-                    loss.backward()
-                    self.optim.step()
+                self.optim.zero_grad(set_to_none=True)
+                loss.backward()
+                self.optim.step()
                     
-                    if t > 0 and t % 2500 == 0: # update target net every 10k steps , 2500 = TARGET_NET_UPDATE_FREQ / 4
-                        self.target_net.load_state_dict(self.q1.state_dict())
+                if t > 0 and t % 2500 == 0: # update target net every 10k steps , 2500 = TARGET_NET_UPDATE_FREQ / 4
+                    self.target_net.load_state_dict(self.q1.state_dict())
                         
-                    if t > 0 and t % 1_000 == 0:
-                        self.save(n) 
-                        mlflow.log_metrics({
-                            "average reward":self.reward_data.mean().item(),
-                            "loss":loss.item(),
-                        },step=n)
+                if t > 0 and t % 1_000 == 0:
+                    self.save(n) 
+                    mlflow.log_metrics({
+                        "average reward":self.reward_data.mean().item(),
+                        "loss":loss.item(),
+                    },step=n)
 
     
     def test(self):
