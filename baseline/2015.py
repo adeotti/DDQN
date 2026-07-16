@@ -26,7 +26,7 @@ MAX_EP_STEPS = 500
 NUM_ENVS = 10
 R_SHAPE = (100,100)
 # -
-DEVICE = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 MAX_STEPS = 7_000 
 GAMMA = .99
 LR = 25e-5
@@ -45,8 +45,6 @@ def vec_env():
     return AsyncVectorEnv([make for _ in range(NUM_ENVS)])
 
 
-import matplotlib.pyplot as plt
-
 env = gym.make("ALE/MsPacman-v5")
 env = GrayscaleObservation(env)
 env = ResizeObservation(env,R_SHAPE)
@@ -57,31 +55,23 @@ class q_function(nn.Module):
     def __init__(self):  
         super().__init__()
         self.c1 = nn.LazyConv2d(32,1,1)
-        self.c2 = nn.LazyConv2d(64,3,2)
-        self.c3 = nn.LazyConv2d(64,3,2)
+        self.c2 = nn.LazyConv2d(64,4,2)
 
-        self.l1 = nn.LazyLinear(1024)
-        self.l2 = nn.LazyLinear(512)
-        self.l3 = nn.LazyLinear(9)
+        self.l1 = nn.LazyLinear(2048)
+        self.l2 = nn.LazyLinear(1024)
+        self.l3 = nn.LazyLinear(512)
+        self.l4 = nn.LazyLinear(9)
 
     def forward(self,s):
-        x = F.silu(self.c1(s)) 
-        x = F.silu(self.c2(x)) 
-        x = F.silu(self.c3(x)) 
-
+        x = self.c1(s)
+        x = F.relu(self.c2(x))
+    
         x = F.silu(self.l1(x.flatten(1)))
         x = F.silu(self.l2(x))
         x = F.silu(self.l3(x))
+        x = F.silu(self.l4(x))
         return x
 
-"""
-fig,ax = plt.subplots(1,1,figsize=(4,4))
-output = q_function()(torch.tensor(state,dtype=torch.float).unsqueeze(0).unsqueeze(0))
-#print(output.shape)
-ax.imshow(output[0][0].detach().numpy())
-plt.savefig("./t.png")
-sys.exit("here")
-"""
 
 class ddqn:
     def __init__(self,storage_path=None):
