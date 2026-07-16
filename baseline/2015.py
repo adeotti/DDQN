@@ -8,6 +8,7 @@ import gymnasium as gym
 import ale_py
 from gymnasium.vector.async_vector_env import AsyncVectorEnv
 from gymnasium.wrappers.transform_observation import GrayscaleObservation,ResizeObservation
+from gymnasium.wrappers import FrameStackObservation
 
 import torch,sys,random,mlflow
 import torch.nn as nn
@@ -17,13 +18,15 @@ from copy import deepcopy
 from collections import deque
 from itertools import chain
 from tqdm import tqdm
+from threading import Thread
+from queue import Queue
 
 
 MAX_EP_STEPS = 500
-NUM_ENVS = 2#10
+NUM_ENVS = 10
 R_SHAPE = (100,100)
 # -
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DEVICE = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
 MAX_STEPS = 7_000 
 GAMMA = .99
 LR = 25e-5
@@ -36,15 +39,24 @@ def vec_env():
     def make():
         x = gym.make("ALE/MsPacman-v5",max_episode_steps=MAX_EP_STEPS)
         x = GrayscaleObservation(x)
-        x = ResizeObservation(x,R_SHAPE) 
+        x = ResizeObservation(x,R_SHAPE)
+        x = FrameStackObservation(x,4)
         return x # [1, 150, 150]
     return AsyncVectorEnv([make for _ in range(NUM_ENVS)])
 
 
+import matplotlib.pyplot as plt
+
+env = gym.make("ALE/MsPacman-v5")
+env = GrayscaleObservation(env)
+env = ResizeObservation(env,R_SHAPE)
+
+state = env.reset()[0]
+
 class q_function(nn.Module):
     def __init__(self):  
         super().__init__()
-        self.c1 = nn.LazyConv2d( 32,1,1)
+        self.c1 = nn.LazyConv2d(32,1,1)
         self.c2 = nn.LazyConv2d(64,3,2)
         self.c3 = nn.LazyConv2d(64,3,2)
 
@@ -62,29 +74,37 @@ class q_function(nn.Module):
         x = F.silu(self.l3(x))
         return x
 
+"""
+fig,ax = plt.subplots(1,1,figsize=(4,4))
+output = q_function()(torch.tensor(state,dtype=torch.float).unsqueeze(0).unsqueeze(0))
+#print(output.shape)
+ax.imshow(output[0][0].detach().numpy())
+plt.savefig("./t.png")
+sys.exit("here")
+"""
 
 class ddqn:
     def __init__(self,storage_path=None):
         self.storage_path = storage_path
         self.env = vec_env()
+        channels = self.env.observation_space.shape[1]
   
-        q_function()(torch.randint(0,255,(NUM_ENVS,1,*R_SHAPE),dtype=torch.float)) # init
+        q_function()(torch.randint(0,255,(NUM_ENVS,channels,*R_SHAPE),dtype=torch.float))
         self.q1 = q_function()
         self.target_net = deepcopy(self.q1)
         self.buffer = deque(maxlen=MAX_EP_STEPS)
 
         self.q1.to(DEVICE) 
         self.target_net.to(DEVICE) 
-        self.q1.compile()
+        self.q1.compile() 
         self.target_net.compile()
 
         self.optim = torch.optim.Adam(chain(self.q1.parameters(),self.target_net.parameters()),lr=LR)
         self.reward_data = torch.zeros(NUM_ENVS,dtype=torch.float)
         self.step_count = 0
     
-    def save(self,n):
-        data = {
-            "q1 state":self.q1.state_dict(),
+    def save(self,n): 
+        data = { "q1 state":self.q1.state_dict(),
             "target net state":self.target_net.state_dict(),
             "optim state":self.optim.state_dict()
         }
@@ -92,12 +112,13 @@ class ddqn:
 
 
     def stack__(self,x):
-        x = torch.tensor(x,dtype=torch.float,device=DEVICE)
+        x = [torch.tensor(item, dtype=torch.float, device=DEVICE) for item in x]
         x = torch.stack(x)
         return x
 
     
     def main(self):
+        mlflow.set_experiment("pacman")
         with mlflow.start_run() as run:
 
             self.state = torch.tensor(self.env.reset()[0],dtype=torch.float,device=DEVICE).unsqueeze(1)
@@ -124,7 +145,6 @@ class ddqn:
                         
                         self.state = torch.tensor(nx_state,dtype=torch.float,device=DEVICE).unsqueeze(1)
                         self.step_count += 1
-
               
                 b_state = self.stack__(b_state)
                 b_state = b_state.reshape(-1,1,*R_SHAPE)  # (steps*envs,1,R_SHAPE)
@@ -133,7 +153,7 @@ class ddqn:
                 b_nx_state = b_nx_state.unsqueeze(2).reshape(-1,1,*R_SHAPE) # (steps*envs,1,R_SHAPE)
 
                 b_reward = self.stack__(b_reward).reshape(-1)    # (steps*envs,)
-                b_done   = self.stack__(b_done))).reshape(-1)    # (steps*envs,)
+                b_done   = self.stack__(b_done).reshape(-1)    # (steps*envs,)
                 b_action = self.stack__(b_action).reshape(-1, 1) # (steps*envs,1)
                 
                 for t in range(Q1_NET_UPDATE_FREQ):
@@ -194,4 +214,12 @@ class ddqn:
 if __name__ == "__main__": 
     import warnings,logging
     warnings.filterwarnings("ignore") ; logging.disable(logging.CRITICAL)
-    ddqn("./").test()
+    ddqn("./").main()
+    
+     
+
+
+
+
+
+
