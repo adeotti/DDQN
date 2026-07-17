@@ -10,13 +10,12 @@ from gymnasium.vector.async_vector_env import AsyncVectorEnv
 from gymnasium.wrappers.transform_observation import GrayscaleObservation,ResizeObservation
 from gymnasium.wrappers import FrameStackObservation
 
-import torch,sys,random,mlflow,os,time
+import torch,sys,random,mlflow,time
 import torch.nn as nn
 import torch.nn.functional as F
 
 from copy import deepcopy
 from collections import deque
-from itertools import chain
 from tqdm import tqdm
 from threading import Thread
 from queue import Queue
@@ -55,7 +54,7 @@ state = env.reset()[0]
 class q_function(nn.Module):
     def __init__(self):  
         super().__init__()
-        self.c1 = nn.LazyConv2d(32,1,1)
+        self.c1 = nn.LazyConv2d(32,1,1) # TODO : Kernel 8 , stride 4 
         self.c2 = nn.LazyConv2d(64,4,2)
 
         self.l1 = nn.LazyLinear(2048)
@@ -90,7 +89,7 @@ class ddqn:
         self.q1.compile() 
         self.target_net.compile()
 
-        self.optim = torch.optim.Adam(chain(self.q1.parameters(),self.target_net.parameters()),lr=LR)
+        self.optim = torch.optim.Adam(self.q1.parameters()),lr=LR)
         self.reward_data = torch.zeros(NUM_ENVS,dtype=torch.float)
         self.step_count = 0
         self.init_storage() # !!
@@ -124,6 +123,7 @@ class ddqn:
 
     @torch.no_grad()
     def step_env(self,queue):
+        #data_list = []
         n = 0
         for t in range(MAX_STEPS):
             if self.step_count == 0:
@@ -135,12 +135,11 @@ class ddqn:
             if random.random() < epsilon : 
                 action = self.env.action_space.sample()
             else :
-                action = torch.argmax(self.q1(self.state.to(DEVICE)),dim=1).tolist()
+                action = torch.argmax(self.q1(self.state.to(DEVICE)),dim=1).tolist() # TODO : add cuda stream 
                         
             nx_state,reward,done,trunc,_ = self.env.step(action)
             self.reward_data += reward
             
-            #data_list.append((self.state,nx_state,reward,done,action))
             self.t_state[n].copy_(torch.tensor(self.state))
             self.t_nx_state[n].copy_(torch.tensor(nx_state))
             self.t_reward[n].copy_(torch.tensor(reward))
@@ -162,6 +161,7 @@ class ddqn:
             self.state = torch.tensor(nx_state,dtype=torch.float,device="cpu")
             self.step_count += 1
             
+
 
     def sample(self,queue):
         while True: 
@@ -211,7 +211,7 @@ class ddqn:
                     self.target_net.load_state_dict(self.q1.state_dict())
                         
                 if t > 0 and t % 500 == 0:
-                    self.save(n) 
+                    self.save(t) 
                     mlflow.log_metrics({
                         "average reward":self.reward_data.mean().item(),
                         "loss":loss.item(),
@@ -237,7 +237,6 @@ class ddqn:
             env.render()
             if done or trunc:
                 break
-
 
 if __name__ == "__main__": 
     import warnings,logging
