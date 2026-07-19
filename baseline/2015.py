@@ -45,28 +45,24 @@ env = gym.make("ALE/MsPacman-v5")
 env = GrayscaleObservation(env)
 env = ResizeObservation(env,R_SHAPE)
 
-state = env.reset()[0]
 
 class q_function(nn.Module):
     def __init__(self):  
         super().__init__()
-        self.c1 = nn.LazyConv2d(32,1,1) # TODO : Kernel 8 , stride 4 
+        self.c1 = nn.LazyConv2d(32,8,4)  
         self.c2 = nn.LazyConv2d(64,4,2)
+        self.c3 = nn.LazyConv2d(64,3,1)
 
-        self.l1 = nn.LazyLinear(2048)
-        self.l2 = nn.LazyLinear(1024)
-        self.l3 = nn.LazyLinear(512)
-        self.l4 = nn.LazyLinear(9)
+        self.l1 = nn.LazyLinear(512)
+        self.l2 = nn.LazyLinear(9)
 
     def forward(self,s):
         x = self.c1(s)
-        x = F.relu(self.c2(x))
-    
-        x = F.relu(self.l1(x.flatten(1)))
-        x = F.relu(self.l2(x))
-        x = F.relu(self.l3(x))
-        x = F.relu(self.l4(x))
-        return x
+        x = F.silu(self.c2(x))
+        x = F.silu(self.c3(x))
+        
+        x = F.silu(self.l1(x.flatten(1)))
+        return self.l2(x)
 
 
 class ddqn:
