@@ -41,11 +41,6 @@ def vec_env():
     return AsyncVectorEnv([make for _ in range(NUM_ENVS)])
 
 
-env = gym.make("ALE/MsPacman-v5")
-env = GrayscaleObservation(env)
-env = ResizeObservation(env,R_SHAPE)
-
-
 class q_function(nn.Module):
     def __init__(self):  
         super().__init__()
@@ -79,8 +74,8 @@ class ddqn:
         self.q1.to(DEVICE) 
         self.target_net.to(DEVICE)
 
-        self.q1.compile(mode="max-autotune-no-cudagraphs")#(mode="max-autotune") 
-        self.target_net.compile(mode="max-autotune-no-cudagraphs")#(mode="max-autotune")
+        self.q1.compile(mode="max-autotune") 
+        self.target_net.compile(mode="max-autotune")
 
         self.optim = torch.optim.Adam(self.q1.parameters(),lr=LR)
         self.reward_data = torch.zeros(NUM_ENVS,dtype=torch.float)
@@ -109,17 +104,6 @@ class ddqn:
         }
         torch.save(data,f"{self.storage_path}/state_{n}.pth")
 
-
-    @torch.compile(mode="max-autotune-no-cudagraphs")#(mode="max-autotune")
-    def compute_loss(self,s_nx_state,s_reward,s_done,pred_q):
-        with torch.no_grad(): # target q
-            # prediciton using q1 -> eval of q1 prediction using Q target -> TD(0) 
-            nx_action = torch.argmax(self.q1(s_nx_state),1).unsqueeze(-1)
-            eval_ = self.target_net(s_nx_state).gather(1,nx_action) 
-            target = s_reward + GAMMA * eval_ * (1-s_done)
-            
-        loss = F.mse_loss(pred_q,target).mean()
-        return loss
 
     def main(self,gpu_strean=None):
         mlflow.set_experiment("pacman")
