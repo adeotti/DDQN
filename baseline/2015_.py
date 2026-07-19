@@ -30,6 +30,7 @@ LR = 25e-5
 BATCH_SIZE = 32
 Q1_NET_UPDATE_FREQ = MAX_STEPS // 4 # update q1 weights every 4 steps 
 TARGET_NET_UPDATE_FREQ = int(10e3)  # update q target weights every 10k steps
+BUFFER_SIZE = 100_000
 
 
 def vec_env():
@@ -129,6 +130,8 @@ class ddqn:
 
 
     def sample_processor(self, ep_queue, batch_queue):
+        replay_buffer = deque(maxsize=BUFFER_SIZE)
+
         while True:
             ep_state,ep_nx_state,ep_reward,ep_done,ep_action = ep_queue.get()
             

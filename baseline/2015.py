@@ -75,7 +75,6 @@ class ddqn:
         self.target_net.to(DEVICE)
 
         self.q1.compile(mode="max-autotune") 
-        self.target_net.compile(mode="max-autotune")
 
         self.optim = torch.optim.Adam(self.q1.parameters(),lr=LR)
         self.reward_data = torch.zeros(NUM_ENVS,dtype=torch.float)
@@ -129,7 +128,8 @@ class ddqn:
 
                         nx_state,reward,done,trunc,_ = self.env.step(action)
                         self.reward_data += reward
-            
+                        
+                        # TODO : Switch to 100k size replay buffer
                         self.t_state[i].copy_(self.state)
                         self.t_nx_state[i].copy_(torch.as_tensor(nx_state))
                         self.t_reward[i].copy_(torch.as_tensor(reward))
