@@ -5,7 +5,7 @@ import gymnasium as gym
 import ale_py
 from gymnasium.vector.async_vector_env import AsyncVectorEnv
 from gymnasium.wrappers.transform_observation import GrayscaleObservation,ResizeObservation
-from gymnasium.wrappers import FrameStackObservation
+from gymnasium.wrappers import FrameStackObservation,ClipReward
 
 import torch,sys,random,mlflow,time
 import torch.nn as nn
@@ -15,12 +15,12 @@ from copy import deepcopy
 from collections import deque
 from tqdm import tqdm
 from threading import Thread,Event
-from queue import Queue
+from queue import Queue,Empty
 from ratelimit import limits, sleep_and_retry
 
 
 MAX_EP_STEPS = 500
-NUM_ENVS = 5
+NUM_ENVS = 10
 R_SHAPE = (100,100)
 # -
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -57,6 +57,7 @@ def vec_env():
         x = GrayscaleObservation(x)
         x = ResizeObservation(x,R_SHAPE)
         x = SkipFrame(x,4)
+        x = ClipReward(x,-1,1)
         x = FrameStackObservation(x,4)
         return x 
     return AsyncVectorEnv([make for _ in range(NUM_ENVS)])
@@ -94,7 +95,6 @@ class ddqn:
 
         self.q1_cpu = deepcopy(self.q1).cpu()
         self.q1_cpu(dummy_obs)
-        self.q1_cpu.share_memory()
         
         self.q1.compile(mode="max-autotune")
         
@@ -161,31 +161,44 @@ class ddqn:
         b_action = torch.zeros(BUFFER_SIZE,NUM_ENVS,dtype=torch.int64)
         ptr = 0
         size = 0
+        
+        while True:
 
-        while True:           
-            ep_state,ep_nx_state,ep_reward,ep_done,ep_action = ep_queue.get()
+            while True:
+                try:
+                    ep_state,ep_nx_state,ep_reward,ep_done,ep_action = ep_queue.get_nowait()
             
-            indices = torch.arange(ptr, ptr + MAX_EP_STEPS) % BUFFER_SIZE # circular buffer core indexing method 
-            b_state[indices] = ep_state.to(torch.uint8)
-            b_nx_state[indices] = ep_nx_state.to(torch.uint8)
-            b_reward[indices] = ep_reward
-            b_done[indices] = ep_done.to(torch.bool)
-            b_action[indices] = ep_action
+                    indices = torch.arange(ptr, ptr + MAX_EP_STEPS) % BUFFER_SIZE # circular buffer core indexing method 
+                    b_state[indices] = ep_state.to(torch.uint8)
+                    b_nx_state[indices] = ep_nx_state.to(torch.uint8)
+                    b_reward[indices] = ep_reward
+                    b_done[indices] = ep_done.to(torch.bool)
+                    b_action[indices] = ep_action
 
-            ptr = (ptr + MAX_EP_STEPS) % BUFFER_SIZE
-            size = min(size + MAX_EP_STEPS,BUFFER_SIZE)
- 
-            for _ in range(MAX_EP_STEPS//4): # sampling every 4 step, 500 steps -> 125 samples
-                time.sleep(0.03)
-                idx = torch.randint(0,size,(BATCH_SIZE,))
-                s_state = b_state[idx].flatten(0,1)
-                s_nx_state = b_nx_state[idx].flatten(0,1)
-                s_reward = b_reward[idx].reshape(-1)
-                s_done = b_done[idx].reshape(-1)
-                s_action = b_action[idx].reshape(-1,1)
+                    ptr = (ptr + MAX_EP_STEPS) % BUFFER_SIZE
+                    size = min(size + MAX_EP_STEPS,BUFFER_SIZE)
+                except Empty:
+                    break
 
-                items = (s_state,s_nx_state,s_reward,s_done,s_action)
-                batch_queue.put(items)
+            if size < BATCH_SIZE:
+                time.sleep(0.001)
+                continue
+            
+            if not batch_queue.full():
+                for _ in range(MAX_EP_STEPS//4): # sampling every 4 step, 500 steps -> 125 samples
+                    idx = torch.randint(0,size,(BATCH_SIZE,))
+                    env_idx = torch.randint(0, NUM_ENVS, (BATCH_SIZE,))
+             
+                    s_state = b_state[idx,env_idx]       # torch.Size([32, 4, 100, 100])
+                    s_nx_state = b_nx_state[idx,env_idx] # torch.Size([32, 4, 100, 100])
+                    s_reward = b_reward[idx,env_idx]     # torch.Size([32]) 
+                    s_done = b_done[idx,env_idx]         # torch.Size([32])
+                    s_action = b_action[idx,env_idx]     # torch.Size([32])
+              
+                    items = (s_state,s_nx_state,s_reward,s_done,s_action)
+                    batch_queue.put(items)
+            else:
+                time.sleep(0.001)
                 
                 
     def save(self,n): 
@@ -219,11 +232,11 @@ class ddqn:
             for t in tqdm(range((40_000) + 1),total=(40_000) + 1):
                 s_state,s_nx_state,s_reward,s_done,s_action = self.batch_queue.get()
 
-                s_state = s_state.to(DEVICE,torch.float32,non_blocking=True)
-                s_nx_state = s_nx_state.to(DEVICE,torch.float32,non_blocking=True)
-                s_reward = s_reward.to(DEVICE,non_blocking=True)
-                s_done = s_done.to(DEVICE,torch.float32,non_blocking=True)
-                s_action = s_action.to(DEVICE,non_blocking=True)
+                s_state = s_state.to(DEVICE,torch.float32)
+                s_nx_state = s_nx_state.to(DEVICE,torch.float32)
+                s_reward = s_reward.to(DEVICE)
+                s_done = s_done.to(DEVICE,torch.float32)
+                s_action = s_action.to(DEVICE)
 
                 with torch.amp.autocast(device_type="cuda",dtype=torch.bfloat16):
                     pred_q = self.q1(s_state).gather(1,s_action).squeeze(1)
@@ -236,14 +249,15 @@ class ddqn:
                 if self.target_sync_event.is_set():
                     self.target_net.load_state_dict(self.q1.state_dict())
                     self.target_sync_event.clear() 
-                
-                if t > 0 and t % 2_000 == 0: 
+             
+                if t > 0 and t % 500 == 0: 
                     mlflow.log_metrics({
                         "average reward": self.reward_data.mean().item(),
-                        "loss": current_loss,
+                        "loss": loss.item(),
                         },step=self.global_step
                     ) 
                     self.reward_data = torch.zeros(NUM_ENVS,dtype=torch.float)
+                    self.q1_cpu.load_state_dict(self.q1.state_dict()) # update cpu version weights
             
             self.save(t)
 
@@ -252,11 +266,12 @@ class ddqn:
         env = gym.make("ALE/MsPacman-v5",max_episode_steps=MAX_EP_STEPS,render_mode="human")
         env = GrayscaleObservation(env)
         env = ResizeObservation(env,R_SHAPE)
+        env = SkipFrame(env,4)
         env = FrameStackObservation(env,4)
         state = env.reset()[0]
         
         policy = q_function()
-        checkpoint = torch.load("./state_40000.pth", map_location=torch.device("cpu"))
+        checkpoint = torch.load("./state_40000.pth",map_location=torch.device("cpu"))
         compiled_state_dict = {k.replace("_orig_mod.", ""): v for k, v in checkpoint["q1 state"].items()}
         policy.load_state_dict(compiled_state_dict)
 
@@ -274,4 +289,5 @@ if __name__ == "__main__":
     import warnings,logging
     warnings.filterwarnings("ignore") ; logging.disable(logging.CRITICAL)
     ddqn("./").main()
+
     
