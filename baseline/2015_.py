@@ -19,17 +19,15 @@ from queue import Queue,Empty
 from ratelimit import limits, sleep_and_retry
 
 
+# target max steps : int(35e5)
 MAX_EP_STEPS = 500
 NUM_ENVS = 10
 R_SHAPE = (100,100)
-# -
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-MAX_STEPS = int(35e5)
 GAMMA = .99
 LR = 25e-5
 BATCH_SIZE = 32
-Q1_NET_UPDATE_FREQ = MAX_STEPS // 4 # update q1 weights every 4 steps 
-TARGET_NET_UPDATE_FREQ = int(10e3)  # update q target weights every 10k steps
+TARGET_NET_UPDATE_FREQ = int(10e3) // NUM_ENVS  # update q target weights every 10k steps
 BUFFER_SIZE = 100_000 // NUM_ENVS
 
 
@@ -43,6 +41,8 @@ class SkipFrame(gym.Wrapper):
         for n in range(self.skip):
             observation,reward,done,truncation,info = self.env.step(action)
             _rewards += reward
+            if done or truncation:
+                break
     
         return observation,_rewards,done,truncation,info
 
@@ -91,15 +91,12 @@ class ddqn:
         dummy_obs = (torch.randint(0,255,(NUM_ENVS,self.channels,*R_SHAPE),dtype=torch.float))
         self.q1 = q_function()
         self.q1(dummy_obs)
-        self.q1 = q_function().to(DEVICE)
+        self.q1.to(DEVICE)
 
         self.q1_cpu = deepcopy(self.q1).cpu()
-        self.q1_cpu(dummy_obs)
+        self.target_net = deepcopy(self.q1).to(DEVICE)        
+        self.q1.compile(mode="max-autotune") 
         
-        self.q1.compile(mode="max-autotune")
-        
-        self.target_net = deepcopy(self.q1).to(DEVICE)
-
         self.optim = torch.optim.Adam(self.q1.parameters(),lr=LR,fused=True)
         self.reward_data = torch.zeros(NUM_ENVS, dtype=torch.float)
         self.global_step = 0
@@ -108,12 +105,9 @@ class ddqn:
         self.episode_queue = Queue(maxsize=40) # holds full raw episodes
         self.batch_queue = Queue(maxsize=125)  # holds processed batches for GPU
 
-        self.thread_1 = Thread(target=self.step_env,args=(self.episode_queue,),daemon=True)
-        self.thread_2 = Thread(target=self.sample_processor,args=(self.episode_queue,self.batch_queue),daemon=True)
-
  
     @torch.no_grad()
-    def step_env(self,queue):
+    def step_env(self,queue,run_id):
         t_state = torch.zeros(MAX_EP_STEPS,NUM_ENVS,self.channels,*R_SHAPE,dtype=torch.uint8)
         t_nx_state = torch.zeros(MAX_EP_STEPS,NUM_ENVS,self.channels,*R_SHAPE,dtype=torch.uint8)
         t_reward = torch.zeros(MAX_EP_STEPS,NUM_ENVS)
@@ -149,6 +143,7 @@ class ddqn:
 
             if n == MAX_EP_STEPS:
                 queue.put((t_state,t_nx_state,t_reward,t_done,t_action))
+                mlflow.log_metric("average reward",self.reward_data.mean().item(),step=self.global_step,run_id=run_id) 
                 n = 0
                 self.reward_data = torch.zeros(NUM_ENVS,dtype=torch.float)
     
@@ -193,7 +188,7 @@ class ddqn:
                     s_nx_state = b_nx_state[idx,env_idx] # torch.Size([32, 4, 100, 100])
                     s_reward = b_reward[idx,env_idx]     # torch.Size([32]) 
                     s_done = b_done[idx,env_idx]         # torch.Size([32])
-                    s_action = b_action[idx,env_idx]     # torch.Size([32])
+                    s_action = b_action[idx,env_idx].unsqueeze(-1) # torch.Size([32,1])
               
                     items = (s_state,s_nx_state,s_reward,s_done,s_action)
                     batch_queue.put(items)
@@ -223,6 +218,10 @@ class ddqn:
         mlflow.set_experiment("pacman")
         with mlflow.start_run() as run:
 
+            run_id = run.info.run_id # to track average reward being tracking in the thread 1
+            self.thread_1 = Thread(target=self.step_env,args=(self.episode_queue,run_id),daemon=True)
+            self.thread_2 = Thread(target=self.sample_processor,args=(self.episode_queue,self.batch_queue),daemon=True)
+
             self.thread_1.start()
             while self.episode_queue.qsize() < 30: 
                 time.sleep(0.01)
@@ -251,12 +250,7 @@ class ddqn:
                     self.target_sync_event.clear() 
              
                 if t > 0 and t % 500 == 0: 
-                    mlflow.log_metrics({
-                        "average reward": self.reward_data.mean().item(),
-                        "loss": loss.item(),
-                        },step=self.global_step
-                    ) 
-                    self.reward_data = torch.zeros(NUM_ENVS,dtype=torch.float)
+                    mlflow.log_metric("loss",loss.item(),step=self.global_step) 
                     self.q1_cpu.load_state_dict(self.q1.state_dict()) # update cpu version weights
             
             self.save(t)
@@ -288,6 +282,6 @@ class ddqn:
 if __name__ == "__main__": 
     import warnings,logging
     warnings.filterwarnings("ignore") ; logging.disable(logging.CRITICAL)
-    ddqn("./").main()
+    ddqn("./").test()
 
     
