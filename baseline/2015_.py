@@ -22,7 +22,7 @@ from queue import Queue,Empty
 MAX_EP_STEPS = 500
 NUM_ENVS = 10
 R_SHAPE = (100,100)
-DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+DEVICE = torch.device("cuda:0")
 GAMMA = .99
 LR = 25e-5
 BATCH_SIZE = 32
@@ -268,18 +268,20 @@ class ddqn:
         checkpoint = torch.load("./state_81.pth",map_location=torch.device("cpu"))
         compiled_state_dict = {k.replace("_orig_mod.",""): v for k, v in checkpoint["q1 state"].items()}
         policy.load_state_dict(compiled_state_dict)
-
-        for n in range(500*10):
+        rewards = 0 
+        while True:
             state = torch.tensor(state,dtype=torch.float).unsqueeze(0) 
             nx_s,reward,done,trunc,_ = env.step(torch.argmax(policy(state)).item())
             state = nx_s
+            rewards += reward
            
             env.render()
             if done or trunc:
+                print(rewards)
                 break
 
 
 if __name__ == "__main__": 
     import warnings,logging
     warnings.filterwarnings("ignore") ; logging.disable(logging.CRITICAL)
-    ddqn("./").main()
+    ddqn("./").test()
