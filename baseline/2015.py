@@ -1,43 +1,62 @@
 """
-van Hasselt et al.(2015)
-
-environment : Ms PacMan
-https://ale.farama.org/environments/ms_pacman/
+Multi-threaded DDQN version of the 2015.py file 
 """
 import gymnasium as gym 
 import ale_py
 from gymnasium.vector.async_vector_env import AsyncVectorEnv
 from gymnasium.wrappers.transform_observation import GrayscaleObservation,ResizeObservation
-from gymnasium.wrappers import FrameStackObservation
+from gymnasium.wrappers import FrameStackObservation,ClipReward
 
-import torch,sys,random,mlflow
+import torch,sys,random,mlflow,time
 import torch.nn as nn
 import torch.nn.functional as F
 
 from copy import deepcopy
 from collections import deque
 from tqdm import tqdm
+from threading import Thread,Event
+from queue import Queue,Empty
 
 
+# target max steps : 50 Million
 MAX_EP_STEPS = 500
 NUM_ENVS = 10
 R_SHAPE = (100,100)
-# -
-DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-MAX_STEPS = 7_000 
+DEVICE = torch.device("cuda:0")
 GAMMA = .99
 LR = 25e-5
 BATCH_SIZE = 32
-Q1_NET_UPDATE_FREQ = MAX_STEPS // 4 # update q1 weights every 4 steps 
-TARGET_NET_UPDATE_FREQ = int(10e3)  # update q target weights every 10k steps
+BUFFER_SIZE = 100_000 // NUM_ENVS
+
+
+class SkipFrame(gym.Wrapper):
+    def __init__(self,env,skip):
+        super().__init__(env)
+        self.skip = skip
+
+    def step(self,action):
+        _rewards = 0
+        for n in range(self.skip):
+            observation,reward,done,truncation,info = self.env.step(action)
+            _rewards += reward
+            if done or truncation:
+                break 
+        return observation,_rewards,done,truncation,info
+
+    def reset(self,**kwargs):
+        observation,info = self.env.reset(**kwargs)
+        return observation,info
+
 
 def vec_env():
     def make():
         x = gym.make("ALE/MsPacman-v5",max_episode_steps=MAX_EP_STEPS)
-        x = GrayscaleObservation(x)
         x = ResizeObservation(x,R_SHAPE)
+        x = GrayscaleObservation(x)
+        x = SkipFrame(x,4)
+        x = ClipReward(x,-1,1)
         x = FrameStackObservation(x,4)
-        return x # [4, 150, 150]
+        return x 
     return AsyncVectorEnv([make for _ in range(NUM_ENVS)])
 
 
@@ -52,152 +71,217 @@ class q_function(nn.Module):
         self.l2 = nn.LazyLinear(9)
 
     def forward(self,s):
-        x = self.c1(s)
+        x = s / 255.
+        x = F.silu(self.c1(x))
         x = F.silu(self.c2(x))
-        x = F.silu(self.c3(x))
-        
+        x = F.silu(self.c3(x)) 
         x = F.silu(self.l1(x.flatten(1)))
         return self.l2(x)
 
 
 class ddqn:
-    def __init__(self,storage_path=None):
+    def __init__(self,storage_path="./"):
         self.storage_path = storage_path
         self.env = vec_env()
         self.channels = self.env.observation_space.shape[1]
-    
+        
         dummy_obs = (torch.randint(0,255,(NUM_ENVS,self.channels,*R_SHAPE),dtype=torch.float))
         self.q1 = q_function()
         self.q1(dummy_obs)
-        self.target_net = deepcopy(self.q1)
+        self.q1.to(DEVICE)
 
-        self.q1.to(DEVICE) 
-        self.target_net.to(DEVICE)
-
+        self.q1_cpu = deepcopy(self.q1).cpu()
+        self.target_net = deepcopy(self.q1).to(DEVICE)        
         self.q1.compile(mode="max-autotune") 
+        
+        self.optim = torch.optim.Adam(self.q1.parameters(),lr=LR,fused=True)
+        self.reward_data = torch.zeros(NUM_ENVS, dtype=torch.float)
+        self.global_step = 0
+        self.target_sync_event = Event() # tracking global steps
 
-        self.optim = torch.optim.Adam(self.q1.parameters(),lr=LR)
-        self.reward_data = torch.zeros(NUM_ENVS,dtype=torch.float)
-        self.init_storage()
-   
+        self.episode_queue = Queue(maxsize=40) # holds full raw episodes
+        self.batch_queue = Queue(maxsize=125)  # holds processed batches for GPU
 
-    def init_storage(self):
-        b = MAX_EP_STEPS 
-        self.t_state = torch.zeros(b,NUM_ENVS,self.channels,*R_SHAPE)
-        self.t_nx_state = torch.zeros(b,NUM_ENVS,self.channels,*R_SHAPE)
-        self.t_reward = torch.zeros(b,NUM_ENVS)
-        self.t_done = torch.zeros(b,NUM_ENVS)
-        self.t_action = torch.zeros(b,NUM_ENVS,dtype=torch.int64)
+ 
+    @torch.no_grad()
+    def step_env(self,queue,run_id):
+        t_state = torch.zeros(MAX_EP_STEPS,NUM_ENVS,self.channels,*R_SHAPE,dtype=torch.uint8)
+        t_nx_state = torch.zeros(MAX_EP_STEPS,NUM_ENVS,self.channels,*R_SHAPE,dtype=torch.uint8)
+        t_reward = torch.zeros(MAX_EP_STEPS,NUM_ENVS)
+        t_done = torch.zeros(MAX_EP_STEPS,NUM_ENVS,dtype=torch.bool)
+        t_action = torch.zeros(MAX_EP_STEPS,NUM_ENVS,dtype=torch.int64)
 
-        self.t_state = self.t_state.pin_memory()
-        self.t_nx_state = self.t_nx_state.pin_memory()
-        self.t_reward = self.t_reward.pin_memory()
-        self.t_done = self.t_done.pin_memory()
-        self.t_action = self.t_action.pin_memory()
+        state = torch.tensor(self.env.reset()[0],dtype=torch.float,device="cpu")
+        n = 0
 
+        while True:
+            decay_fraction = min(self.global_step / int(1e7),1) # decay over 1 million * NUM_ENVS
+            epsilon = 1 - (1 - 0.1) * decay_fraction
 
+            if random.random() < epsilon: action = self.env.action_space.sample()
+            else: action = torch.argmax(self.q1_cpu(state),dim=1).tolist()
+
+            nx_state, reward, done, trunc, _ = self.env.step(action)
+            self.reward_data += reward
+
+            t_state[n].copy_(state)
+            t_nx_state[n].copy_(torch.as_tensor(nx_state))
+            t_reward[n].copy_(torch.as_tensor(reward))
+            t_done[n].copy_(torch.as_tensor(done))
+            t_action[n].copy_(torch.as_tensor(action))
+
+            state = torch.as_tensor(nx_state).float()
+
+            n += 1
+            self.global_step += 1
+
+            if n == MAX_EP_STEPS:
+                queue.put((t_state.clone(),t_nx_state.clone(),t_reward.clone(),t_done.clone(),t_action.clone()))
+                
+                mlflow.log_metrics({
+                    "average reward":self.reward_data.mean().item(),
+                    "epsiolon": epsilon },
+                    step=self.global_step,run_id=run_id
+                ) 
+                n = 0
+                self.reward_data = torch.zeros(NUM_ENVS,dtype=torch.float)
+    
+
+    def sample_processor(self,ep_queue,batch_queue):
+        b_state = torch.zeros(BUFFER_SIZE,NUM_ENVS,self.channels,*R_SHAPE,dtype=torch.uint8)
+        b_nx_state = torch.zeros(BUFFER_SIZE,NUM_ENVS,self.channels,*R_SHAPE,dtype=torch.uint8)
+        b_reward = torch.zeros(BUFFER_SIZE,NUM_ENVS)
+        b_done = torch.zeros(BUFFER_SIZE,NUM_ENVS,dtype=torch.bool)
+        b_action = torch.zeros(BUFFER_SIZE,NUM_ENVS,dtype=torch.int64)
+        ptr = 0
+        size = 0
+        
+        while True:
+
+            while True:
+                try:
+                    ep_state,ep_nx_state,ep_reward,ep_done,ep_action = ep_queue.get_nowait()
+            
+                    indices = torch.arange(ptr, ptr + MAX_EP_STEPS) % BUFFER_SIZE # circular buffer core indexing method 
+                    b_state[indices] = ep_state.to(torch.uint8)
+                    b_nx_state[indices] = ep_nx_state.to(torch.uint8)
+                    b_reward[indices] = ep_reward
+                    b_done[indices] = ep_done.to(torch.bool)
+                    b_action[indices] = ep_action
+
+                    ptr = (ptr + MAX_EP_STEPS) % BUFFER_SIZE
+                    size = min(size + MAX_EP_STEPS,BUFFER_SIZE)
+                except Empty:
+                    break
+
+            if size < MAX_EP_STEPS:
+                time.sleep(0.001)
+                continue
+            
+            if not batch_queue.full():
+                for _ in range(MAX_EP_STEPS//4): # sampling every 4 step, 500 steps -> 125 samples
+                    idx = torch.randint(0,size,(BATCH_SIZE,))
+                    env_idx = torch.randint(0, NUM_ENVS, (BATCH_SIZE,))
+             
+                    s_state = b_state[idx,env_idx]       # torch.Size([32, 4, 100, 100])
+                    s_nx_state = b_nx_state[idx,env_idx] # torch.Size([32, 4, 100, 100])
+                    s_reward = b_reward[idx,env_idx]     # torch.Size([32]) 
+                    s_done = b_done[idx,env_idx]         # torch.Size([32])
+                    s_action = b_action[idx,env_idx].unsqueeze(-1) # torch.Size([32,1])
+              
+                    items = (s_state,s_nx_state,s_reward,s_done,s_action)
+                    batch_queue.put(items)
+            else:
+                time.sleep(0.001)
+                
+                
     def save(self,n): 
-        data = { "q1 state":self.q1.state_dict(),
+        data = { 
+            "q1 state":self.q1.state_dict(),
             "target net state":self.target_net.state_dict(),
             "optim state":self.optim.state_dict()
         }
         torch.save(data,f"{self.storage_path}/state_{n}.pth")
 
 
-    def main(self,gpu_strean=None):
+    @torch.compile(mode="max-autotune")
+    def compute_loss(self,s_nx_state,s_reward,s_done,pred_q):
+        with torch.no_grad():
+            nx_action = torch.argmax(self.q1(s_nx_state),dim=1).unsqueeze(-1)
+            eval_ = self.target_net(s_nx_state).gather(1,nx_action).squeeze(1)
+            target = s_reward + GAMMA * eval_ * (1 - s_done)
+        return F.mse_loss(pred_q,target)
+    
+
+    def main(self):
         mlflow.set_experiment("pacman")
         with mlflow.start_run() as run:
 
-            self.state = torch.as_tensor(self.env.reset()[0],dtype=torch.float)
-            gpu_state = torch.zeros_like(self.state,device=DEVICE)
-            global_step = 0
+            run_id = run.info.run_id # to track average reward being tracking in the thread 1
+            self.thread_1 = Thread(target=self.step_env,args=(self.episode_queue,run_id),daemon=True)
+            self.thread_2 = Thread(target=self.sample_processor,args=(self.episode_queue,self.batch_queue),daemon=True)
 
-            for n in tqdm(range(MAX_STEPS),total=MAX_STEPS):
-                
-                for i in range(MAX_EP_STEPS):
-                    with torch.no_grad():
-                        gpu_state.copy_(self.state)
+            self.thread_1.start()
+            while self.episode_queue.qsize() < 30: 
+                time.sleep(0.01)
 
-                        global_step += 1
+            self.thread_2.start()
+  
+            for t in tqdm(range((3_250_000) + 1),total=(3_250_000) + 1):
+                s_state,s_nx_state,s_reward,s_done,s_action = self.batch_queue.get()
 
-                        decay_fraction = min(global_step/int(1e6),1) # linearly decay epsilon from 1 to 0.1 over 1M steps
-                        epsilon = 1 - (1 - 0.1) * decay_fraction
+                s_state = s_state.to(DEVICE,torch.float32)
+                s_nx_state = s_nx_state.to(DEVICE,torch.float32)
+                s_reward = s_reward.to(DEVICE)
+                s_done = s_done.to(DEVICE,torch.float32)
+                s_action = s_action.to(DEVICE)
 
-                        if random.random() < epsilon : action = self.env.action_space.sample()
-                        else : action = torch.argmax(self.q1(gpu_state),dim=1).tolist()
+                pred_q = self.q1(s_state).gather(1,s_action).squeeze(1)
+                loss = self.compute_loss(s_nx_state,s_reward,s_done,pred_q)
 
-                        nx_state,reward,done,trunc,_ = self.env.step(action)
-                        self.reward_data += reward
-                        
-                        # TODO : Switch to 100k size replay buffer
-                        self.t_state[i].copy_(self.state)
-                        self.t_nx_state[i].copy_(torch.as_tensor(nx_state))
-                        self.t_reward[i].copy_(torch.as_tensor(reward))
-                        self.t_done[i].copy_(torch.as_tensor(done))
-                        self.t_action[i].copy_(torch.as_tensor(action))
+                self.optim.zero_grad(set_to_none=True)
+                loss.backward()
+                self.optim.step()
 
-                        self.state = torch.as_tensor(nx_state,dtype=torch.float)
+                if t > 0 and t % 2_500 == 0:
+                    self.target_net.load_state_dict(self.q1.state_dict()) 
+             
+                if t > 0 and t % 500 == 0: 
+                    mlflow.log_metric("loss",loss.item(),step=t) 
+                    self.q1_cpu.load_state_dict(self.q1.state_dict()) # update cpu version weights
 
-                for t in range(MAX_EP_STEPS//4):
-                    idx = torch.randint(0,MAX_EP_STEPS,(BATCH_SIZE,))
-                    s_state = self.t_state[idx].flatten(0,1).to(DEVICE,non_blocking=True)
-                    s_nx_state = self.t_nx_state[idx].flatten(0,1).to(DEVICE,non_blocking=True)
-                    s_reward = self.t_reward[idx].reshape(-1).to(DEVICE,non_blocking=True)  # (steps*envs,)
-                    s_done = self.t_done[idx].reshape(-1).to(DEVICE,non_blocking=True)  # (steps*envs,)
-                    s_action = self.t_action[idx].reshape(-1,1).to(DEVICE,non_blocking=True) # (steps*envs,1)
-                    
-                    with torch.amp.autocast(device_type="cuda",dtype=torch.bfloat16):
-                        pred_q = self.q1(s_state).gather(1,s_action).squeeze()
-                        
-                        with torch.no_grad(): # target q
-                            # prediciton using q1 -> eval of q1 prediction using Q target -> TD(0) 
-                            nx_action = torch.argmax(self.q1(s_nx_state),1).unsqueeze(-1)
-                            eval_ = self.target_net(s_nx_state).gather(1,nx_action) 
-                            target = s_reward + GAMMA * eval_ * (1-s_done)
+                if t > 0 and t % 40_000 == 0:
+                    self.save(t//40_000)
             
-                        loss = F.mse_loss(pred_q,target).mean()
-                    
-                    self.optim.zero_grad(set_to_none=True)
-                    loss.backward()
-                    self.optim.step()
+            self.save(t)
 
-                    current_loss = loss.item()
-
-                if n > 0 and n % TARGET_NET_UPDATE_FREQ == 0: # hard update of target net every 10k steps
-                    target_net.load_state_dict(q1.state_dict())
-
-                if n > 0 and n % 500 == 0:
-                    self.save(n) 
-                    mlflow.log_metrics({
-                        "average reward":self.reward_data.mean().item(),
-                        "loss":current_loss,
-                    },step=n)
-
-                    self.reward_data = torch.zeros(NUM_ENVS,dtype=torch.float)
-
-
+    
     def test(self):
-        env = gym.make("ALE/MsPacman-v5",max_episode_steps=MAX_EP_STEPS,render_mode="human")
+        env = gym.make("ALE/MsPacman-v5",render_mode="human")
         env = GrayscaleObservation(env)
         env = ResizeObservation(env,R_SHAPE)
+        env = SkipFrame(env,4)
+        env = FrameStackObservation(env,4)
         state = env.reset()[0]
         
-        q_function()(torch.randint(0,255,(1,1,*R_SHAPE),dtype=torch.float))
         policy = q_function()
-        checkpoint = torch.load("./state_4000.pth", map_location=torch.device("cpu"))
-        policy.load_state_dict(checkpoint["q1 state"])
-
-        for n in range(500*10):
-            state = torch.tensor(state,dtype=torch.float).unsqueeze(0).unsqueeze(0) 
+        checkpoint = torch.load("./state_81.pth",map_location=torch.device("cpu"))
+        compiled_state_dict = {k.replace("_orig_mod.",""): v for k, v in checkpoint["q1 state"].items()}
+        policy.load_state_dict(compiled_state_dict)
+        rewards = 0 
+        while True:
+            state = torch.tensor(state,dtype=torch.float).unsqueeze(0) 
             nx_s,reward,done,trunc,_ = env.step(torch.argmax(policy(state)).item())
             state = nx_s
+            rewards += reward
            
             env.render()
             if done or trunc:
+                print(rewards)
                 break
+
 
 if __name__ == "__main__": 
     import warnings,logging
     warnings.filterwarnings("ignore") ; logging.disable(logging.CRITICAL)
-    ddqn("./").main()
-    
+    ddqn("./").test()
