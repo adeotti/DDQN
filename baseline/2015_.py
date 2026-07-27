@@ -16,10 +16,9 @@ from collections import deque
 from tqdm import tqdm
 from threading import Thread,Event
 from queue import Queue,Empty
-from ratelimit import limits, sleep_and_retry
 
 
-# target max steps : int(35e5)
+# target max steps : 50 Million
 MAX_EP_STEPS = 500
 NUM_ENVS = 10
 R_SHAPE = (100,100)
@@ -27,7 +26,6 @@ DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 GAMMA = .99
 LR = 25e-5
 BATCH_SIZE = 32
-TARGET_NET_UPDATE_FREQ = int(10e3) // NUM_ENVS  # update q target weights every 10k steps
 BUFFER_SIZE = 100_000 // NUM_ENVS
 
 
@@ -42,8 +40,7 @@ class SkipFrame(gym.Wrapper):
             observation,reward,done,truncation,info = self.env.step(action)
             _rewards += reward
             if done or truncation:
-                break
-    
+                break 
         return observation,_rewards,done,truncation,info
 
     def reset(self,**kwargs):
@@ -54,8 +51,8 @@ class SkipFrame(gym.Wrapper):
 def vec_env():
     def make():
         x = gym.make("ALE/MsPacman-v5",max_episode_steps=MAX_EP_STEPS)
-        x = GrayscaleObservation(x)
         x = ResizeObservation(x,R_SHAPE)
+        x = GrayscaleObservation(x)
         x = SkipFrame(x,4)
         x = ClipReward(x,-1,1)
         x = FrameStackObservation(x,4)
@@ -118,7 +115,7 @@ class ddqn:
         n = 0
 
         while True:
-            decay_fraction = min(self.global_step / int(1e6), 1)
+            decay_fraction = min(self.global_step / int(1e7),1) # decay over 1 million * NUM_ENVS
             epsilon = 1 - (1 - 0.1) * decay_fraction
 
             if random.random() < epsilon: action = self.env.action_space.sample()
@@ -138,12 +135,14 @@ class ddqn:
             n += 1
             self.global_step += 1
 
-            if self.global_step > 0 and self.global_step % TARGET_NET_UPDATE_FREQ == 0:
-                self.target_sync_event.set()
-
             if n == MAX_EP_STEPS:
-                queue.put((t_state,t_nx_state,t_reward,t_done,t_action))
-                mlflow.log_metric("average reward",self.reward_data.mean().item(),step=self.global_step,run_id=run_id) 
+                queue.put((t_state.clone(),t_nx_state.clone(),t_reward.clone(),t_done.clone(),t_action.clone()))
+                
+                mlflow.log_metrics({
+                    "average reward":self.reward_data.mean().item(),
+                    "epsiolon": epsilon },
+                    step=self.global_step,run_id=run_id
+                ) 
                 n = 0
                 self.reward_data = torch.zeros(NUM_ENVS,dtype=torch.float)
     
@@ -175,7 +174,7 @@ class ddqn:
                 except Empty:
                     break
 
-            if size < BATCH_SIZE:
+            if size < MAX_EP_STEPS:
                 time.sleep(0.001)
                 continue
             
@@ -228,7 +227,7 @@ class ddqn:
 
             self.thread_2.start()
   
-            for t in tqdm(range((40_000) + 1),total=(40_000) + 1):
+            for t in tqdm(range((3_250_000) + 1),total=(3_250_000) + 1):
                 s_state,s_nx_state,s_reward,s_done,s_action = self.batch_queue.get()
 
                 s_state = s_state.to(DEVICE,torch.float32)
@@ -237,27 +236,28 @@ class ddqn:
                 s_done = s_done.to(DEVICE,torch.float32)
                 s_action = s_action.to(DEVICE)
 
-                with torch.amp.autocast(device_type="cuda",dtype=torch.bfloat16):
-                    pred_q = self.q1(s_state).gather(1,s_action).squeeze(1)
-                    loss = self.compute_loss(s_nx_state,s_reward,s_done,pred_q)
+                pred_q = self.q1(s_state).gather(1,s_action).squeeze(1)
+                loss = self.compute_loss(s_nx_state,s_reward,s_done,pred_q)
 
                 self.optim.zero_grad(set_to_none=True)
                 loss.backward()
                 self.optim.step()
 
-                if self.target_sync_event.is_set():
-                    self.target_net.load_state_dict(self.q1.state_dict())
-                    self.target_sync_event.clear() 
+                if t > 0 and t % 2_500 == 0:
+                    self.target_net.load_state_dict(self.q1.state_dict()) 
              
                 if t > 0 and t % 500 == 0: 
-                    mlflow.log_metric("loss",loss.item(),step=self.global_step) 
+                    mlflow.log_metric("loss",loss.item(),step=t) 
                     self.q1_cpu.load_state_dict(self.q1.state_dict()) # update cpu version weights
+
+                if t > 0 and t % 40_000 == 0:
+                    self.save(t//40_000)
             
             self.save(t)
 
     
     def test(self):
-        env = gym.make("ALE/MsPacman-v5",max_episode_steps=MAX_EP_STEPS,render_mode="human")
+        env = gym.make("ALE/MsPacman-v5",render_mode="human")
         env = GrayscaleObservation(env)
         env = ResizeObservation(env,R_SHAPE)
         env = SkipFrame(env,4)
@@ -265,8 +265,8 @@ class ddqn:
         state = env.reset()[0]
         
         policy = q_function()
-        checkpoint = torch.load("./state_40000.pth",map_location=torch.device("cpu"))
-        compiled_state_dict = {k.replace("_orig_mod.", ""): v for k, v in checkpoint["q1 state"].items()}
+        checkpoint = torch.load("./state_81.pth",map_location=torch.device("cpu"))
+        compiled_state_dict = {k.replace("_orig_mod.",""): v for k, v in checkpoint["q1 state"].items()}
         policy.load_state_dict(compiled_state_dict)
 
         for n in range(500*10):
@@ -282,6 +282,4 @@ class ddqn:
 if __name__ == "__main__": 
     import warnings,logging
     warnings.filterwarnings("ignore") ; logging.disable(logging.CRITICAL)
-    ddqn("./").test()
-
-    
+    ddqn("./").main()
