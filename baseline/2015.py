@@ -1,32 +1,32 @@
-"""
-Multi-threaded DDQN version of the 2015.py file 
-"""
+#Multi-threaded DDQN 
+
 import gymnasium as gym 
-import ale_py
 from gymnasium.vector.async_vector_env import AsyncVectorEnv
 from gymnasium.wrappers.transform_observation import GrayscaleObservation,ResizeObservation
 from gymnasium.wrappers import FrameStackObservation,ClipReward
 
-import torch,sys,random,mlflow,time
+import ale_py,torch,sys,random,mlflow,time
 import torch.nn as nn
 import torch.nn.functional as F
 
 from copy import deepcopy
 from collections import deque
 from tqdm import tqdm
-from threading import Thread,Event
+from threading import Thread
 from queue import Queue,Empty
+from dataclasses import dataclass
 
 
-# target max steps : 50 Million
-MAX_EP_STEPS = 500
-NUM_ENVS = 10
-R_SHAPE = (100,100)
-DEVICE = torch.device("cuda:0")
-GAMMA = .99
-LR = 25e-5
-BATCH_SIZE = 32
-BUFFER_SIZE = 100_000 // NUM_ENVS
+@dataclass(frozen=True)
+class hypers: # target max steps : 50 Million
+    max_ep_steps = 500
+    num_envs = 10
+    r_shape = (100,100) 
+    device = torch.device("cuda:0") 
+    gamma = .99 
+    lr = 25e-5
+    batch_size = 32
+    buffer_size = 10_000
 
 
 class SkipFrame(gym.Wrapper):
@@ -50,14 +50,14 @@ class SkipFrame(gym.Wrapper):
 
 def vec_env():
     def make():
-        x = gym.make("ALE/MsPacman-v5",max_episode_steps=MAX_EP_STEPS)
-        x = ResizeObservation(x,R_SHAPE)
+        x = gym.make("ALE/MsPacman-v5",max_episode_steps=hypers().max_ep_steps)
+        x = ResizeObservation(x,hypers().r_shape)
         x = GrayscaleObservation(x)
         x = SkipFrame(x,4)
         x = ClipReward(x,-1,1)
         x = FrameStackObservation(x,4)
         return x 
-    return AsyncVectorEnv([make for _ in range(NUM_ENVS)])
+    return AsyncVectorEnv([make for _ in range(hypers().num_envs)])
 
 
 class q_function(nn.Module):
@@ -81,23 +81,23 @@ class q_function(nn.Module):
 
 class ddqn:
     def __init__(self,storage_path="./"):
+        self.hypers = hypers()
         self.storage_path = storage_path
         self.env = vec_env()
         self.channels = self.env.observation_space.shape[1]
         
-        dummy_obs = (torch.randint(0,255,(NUM_ENVS,self.channels,*R_SHAPE),dtype=torch.float))
+        dummy_obs = (torch.randint(0,255,(self.hypers.num_envs,self.channels,*self.hypers.r_shape),dtype=torch.float))
         self.q1 = q_function()
         self.q1(dummy_obs)
-        self.q1.to(DEVICE)
+        self.q1.to(self.hypers.device)
 
         self.q1_cpu = deepcopy(self.q1).cpu()
-        self.target_net = deepcopy(self.q1).to(DEVICE)        
+        self.target_net = deepcopy(self.q1).to(self.hypers.device)        
         self.q1.compile(mode="max-autotune") 
         
-        self.optim = torch.optim.Adam(self.q1.parameters(),lr=LR,fused=True)
-        self.reward_data = torch.zeros(NUM_ENVS, dtype=torch.float)
+        self.optim = torch.optim.Adam(self.q1.parameters(),lr=self.hypers.lr,fused=True)
+        self.reward_data = torch.zeros(self.hypers.num_envs,dtype=torch.float)
         self.global_step = 0
-        self.target_sync_event = Event() # tracking global steps
 
         self.episode_queue = Queue(maxsize=40) # holds full raw episodes
         self.batch_queue = Queue(maxsize=125)  # holds processed batches for GPU
@@ -105,17 +105,17 @@ class ddqn:
  
     @torch.no_grad()
     def step_env(self,queue,run_id):
-        t_state = torch.zeros(MAX_EP_STEPS,NUM_ENVS,self.channels,*R_SHAPE,dtype=torch.uint8)
-        t_nx_state = torch.zeros(MAX_EP_STEPS,NUM_ENVS,self.channels,*R_SHAPE,dtype=torch.uint8)
-        t_reward = torch.zeros(MAX_EP_STEPS,NUM_ENVS)
-        t_done = torch.zeros(MAX_EP_STEPS,NUM_ENVS,dtype=torch.bool)
-        t_action = torch.zeros(MAX_EP_STEPS,NUM_ENVS,dtype=torch.int64)
+        t_state = torch.zeros(self.hypers.max_ep_steps,self.hypers.num_envs,self.channels,*self.hypers.r_shape,dtype=torch.uint8)
+        t_nx_state = torch.zeros(self.hypers.max_ep_steps,self.hypers.num_envs,self.channels,*self.hypers.r_shape,dtype=torch.uint8)
+        t_reward = torch.zeros(self.hypers.max_ep_steps,self.hypers.num_envs)
+        t_done = torch.zeros(self.hypers.max_ep_steps,self.hypers.num_envs,dtype=torch.bool)
+        t_action = torch.zeros(self.hypers.max_ep_steps,self.hypers.num_envs,dtype=torch.int64)
 
         state = torch.tensor(self.env.reset()[0],dtype=torch.float,device="cpu")
         n = 0
 
         while True:
-            decay_fraction = min(self.global_step / int(1e7),1) # decay over 1 million * NUM_ENVS
+            decay_fraction = min(self.global_step / int(1e5),1) # decay over 1 million / NUM ENVS
             epsilon = 1 - (1 - 0.1) * decay_fraction
 
             if random.random() < epsilon: action = self.env.action_space.sample()
@@ -135,7 +135,7 @@ class ddqn:
             n += 1
             self.global_step += 1
 
-            if n == MAX_EP_STEPS:
+            if n == self.hypers.max_ep_steps:
                 queue.put((t_state.clone(),t_nx_state.clone(),t_reward.clone(),t_done.clone(),t_action.clone()))
                 
                 mlflow.log_metrics({
@@ -144,15 +144,15 @@ class ddqn:
                     step=self.global_step,run_id=run_id
                 ) 
                 n = 0
-                self.reward_data = torch.zeros(NUM_ENVS,dtype=torch.float)
+                self.reward_data = torch.zeros(self.hypers.num_envs,dtype=torch.float)
     
 
     def sample_processor(self,ep_queue,batch_queue):
-        b_state = torch.zeros(BUFFER_SIZE,NUM_ENVS,self.channels,*R_SHAPE,dtype=torch.uint8)
-        b_nx_state = torch.zeros(BUFFER_SIZE,NUM_ENVS,self.channels,*R_SHAPE,dtype=torch.uint8)
-        b_reward = torch.zeros(BUFFER_SIZE,NUM_ENVS)
-        b_done = torch.zeros(BUFFER_SIZE,NUM_ENVS,dtype=torch.bool)
-        b_action = torch.zeros(BUFFER_SIZE,NUM_ENVS,dtype=torch.int64)
+        b_state = torch.zeros(self.hypers.buffer_size,self.hypers.num_envs,self.channels,*self.hypers.r_shape,dtype=torch.uint8)
+        b_nx_state = torch.zeros(self.hypers.buffer_size,self.hypers.num_envs,self.channels,*self.hypers.r_shape,dtype=torch.uint8)
+        b_reward = torch.zeros(self.hypers.buffer_size,self.hypers.num_envs)
+        b_done = torch.zeros(self.hypers.buffer_size,self.hypers.num_envs,dtype=torch.bool)
+        b_action = torch.zeros(self.hypers.buffer_size,self.hypers.num_envs,dtype=torch.int64)
         ptr = 0
         size = 0
         
@@ -162,26 +162,26 @@ class ddqn:
                 try:
                     ep_state,ep_nx_state,ep_reward,ep_done,ep_action = ep_queue.get_nowait()
             
-                    indices = torch.arange(ptr, ptr + MAX_EP_STEPS) % BUFFER_SIZE # circular buffer core indexing method 
+                    indices = torch.arange(ptr, ptr + self.hypers.max_ep_steps) % self.hypers.buffer_size # circular buffer core indexing code 
                     b_state[indices] = ep_state.to(torch.uint8)
                     b_nx_state[indices] = ep_nx_state.to(torch.uint8)
                     b_reward[indices] = ep_reward
                     b_done[indices] = ep_done.to(torch.bool)
                     b_action[indices] = ep_action
 
-                    ptr = (ptr + MAX_EP_STEPS) % BUFFER_SIZE
-                    size = min(size + MAX_EP_STEPS,BUFFER_SIZE)
+                    ptr = (ptr + self.hypers.max_ep_steps) % self.hypers.buffer_size
+                    size = min(size + self.hypers.max_ep_steps,self.hypers.buffer_size)
                 except Empty:
                     break
 
-            if size < MAX_EP_STEPS:
+            if size < self.hypers.max_ep_steps:
                 time.sleep(0.001)
                 continue
             
             if not batch_queue.full():
-                for _ in range(MAX_EP_STEPS//4): # sampling every 4 step, 500 steps -> 125 samples
-                    idx = torch.randint(0,size,(BATCH_SIZE,))
-                    env_idx = torch.randint(0, NUM_ENVS, (BATCH_SIZE,))
+                for _ in range(self.hypers.max_ep_steps//4): # sampling every 4 step, 500 steps -> 125 samples
+                    idx = torch.randint(0,size,(self.hypers.batch_size,))
+                    env_idx = torch.randint(0,self.hypers.num_envs,(self.hypers.batch_size,))
              
                     s_state = b_state[idx,env_idx]       # torch.Size([32, 4, 100, 100])
                     s_nx_state = b_nx_state[idx,env_idx] # torch.Size([32, 4, 100, 100])
@@ -209,7 +209,7 @@ class ddqn:
         with torch.no_grad():
             nx_action = torch.argmax(self.q1(s_nx_state),dim=1).unsqueeze(-1)
             eval_ = self.target_net(s_nx_state).gather(1,nx_action).squeeze(1)
-            target = s_reward + GAMMA * eval_ * (1 - s_done)
+            target = s_reward + self.hypers.gamma * eval_ * (1 - s_done)
         return F.mse_loss(pred_q,target)
     
 
@@ -230,11 +230,11 @@ class ddqn:
             for t in tqdm(range((3_250_000) + 1),total=(3_250_000) + 1):
                 s_state,s_nx_state,s_reward,s_done,s_action = self.batch_queue.get()
 
-                s_state = s_state.to(DEVICE,torch.float32)
-                s_nx_state = s_nx_state.to(DEVICE,torch.float32)
-                s_reward = s_reward.to(DEVICE)
-                s_done = s_done.to(DEVICE,torch.float32)
-                s_action = s_action.to(DEVICE)
+                s_state = s_state.to(self.hypers.device,torch.float32)
+                s_nx_state = s_nx_state.to(self.hypers.device,torch.float32)
+                s_reward = s_reward.to(self.hypers.device)
+                s_done = s_done.to(self.hypers.device,torch.float32)
+                s_action = s_action.to(self.hypers.device)
 
                 pred_q = self.q1(s_state).gather(1,s_action).squeeze(1)
                 loss = self.compute_loss(s_nx_state,s_reward,s_done,pred_q)
@@ -250,8 +250,8 @@ class ddqn:
                     mlflow.log_metric("loss",loss.item(),step=t) 
                     self.q1_cpu.load_state_dict(self.q1.state_dict()) # update cpu version weights
 
-                if t > 0 and t % 40_000 == 0:
-                    self.save(t//40_000)
+                if t > 0 and t % 50_000 == 0:
+                    self.save(t//50_000)
             
             self.save(t)
 
@@ -259,22 +259,21 @@ class ddqn:
     def test(self):
         env = gym.make("ALE/MsPacman-v5",render_mode="human")
         env = GrayscaleObservation(env)
-        env = ResizeObservation(env,R_SHAPE)
+        env = ResizeObservation(env,self.hypers.r_shape)
         env = SkipFrame(env,4)
         env = FrameStackObservation(env,4)
         state = env.reset()[0]
         
         policy = q_function()
-        checkpoint = torch.load("./state_81.pth",map_location=torch.device("cpu"))
+        checkpoint = torch.load("./2015_model.pth",map_location=torch.device("cpu"))
         compiled_state_dict = {k.replace("_orig_mod.",""): v for k, v in checkpoint["q1 state"].items()}
         policy.load_state_dict(compiled_state_dict)
         rewards = 0 
         while True:
             state = torch.tensor(state,dtype=torch.float).unsqueeze(0) 
-            nx_s,reward,done,trunc,_ = env.step(torch.argmax(policy(state)).item())
+            nx_s,reward,done,trunc,info = env.step(torch.argmax(policy(state)).item())
             state = nx_s
             rewards += reward
-           
             env.render()
             if done or trunc:
                 print(rewards)
